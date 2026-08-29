@@ -9,36 +9,71 @@ use std::{
 
 use assert_cmd::cargo::cargo_bin_cmd;
 
-fn output(arguments: &[&str]) -> Output {
-    cargo_bin_cmd!()
-        .args(arguments)
-        .env_remove("RUSTFLAGS")
-        .output()
-        .expect("cargo-depgate should execute")
+/// The binary under test with Cargo's colour output disabled so the child's inherited
+/// stderr carries no ANSI escapes (CI sets `CARGO_TERM_COLOR=always`).
+fn depgate() -> assert_cmd::Command {
+    let mut command = cargo_bin_cmd!();
+    command.env_remove("RUSTFLAGS").env("CARGO_TERM_COLOR", "never");
+    command
 }
 
-/// Removes Cargo's optional diagnostics when another real Cargo process owns its package lock.
-fn strip_lock_contention_lines(stderr: &[u8]) -> Vec<u8> {
-    let mut offset = 0;
+fn output(arguments: &[&str]) -> Output {
+    depgate().args(arguments).output().expect("cargo-depgate should execute")
+}
 
-    for line in stderr.split_inclusive(|byte| *byte == b'\n') {
-        let line_without_newline = line.strip_suffix(b"\n").unwrap_or(line);
-        let line_without_newline =
-            line_without_newline.strip_suffix(b"\r").unwrap_or(line_without_newline);
-        let first_non_whitespace = line_without_newline
-            .iter()
-            .position(|byte| !byte.is_ascii_whitespace())
-            .unwrap_or(line_without_newline.len());
+/// Cargo status verbs that `cargo metadata` may print on its inherited stderr before the
+/// tool's own lines: lock contention, index updates and downloads of platform-specific
+/// crates the host never compiled. They vary run to run and machine to machine.
+const CARGO_STATUS_VERBS: &[&str] = &[
+    "Blocking",
+    "Downloading",
+    "Downloaded",
+    "Updating",
+    "Locking",
+    "Adding",
+    "Removing",
+    "Fetch",
+    "Waiting",
+    "Checking",
+    "Compiling",
+    "Finished",
+];
 
-        if !line_without_newline[first_non_whitespace..]
-            .starts_with(b"Blocking waiting for file lock")
-        {
-            break;
+/// Strips ANSI escape sequences from one line.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find('\x1b') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        // CSI sequences: ESC [ ... final byte in 0x40..=0x7e
+        if let Some(body) = after.strip_prefix('[') {
+            let end =
+                body.find(|c: char| ('\x40'..='\x7e').contains(&c)).map_or(body.len(), |i| i + 1);
+            rest = &body[end..];
+        } else {
+            rest = after;
         }
-        offset += line.len();
     }
+    out.push_str(rest);
+    out
+}
 
-    stderr[offset..].to_vec()
+/// Keeps only the tool's own stderr lines: ANSI escapes removed and every line that
+/// starts with a Cargo status verb dropped, wherever it appears.
+fn strip_cargo_status_lines(stderr: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(stderr);
+    let mut kept = String::with_capacity(text.len());
+    for line in text.lines() {
+        let clean = strip_ansi(line);
+        let first_word = clean.trim_start().split_whitespace().next().unwrap_or("");
+        if CARGO_STATUS_VERBS.contains(&first_word) {
+            continue;
+        }
+        kept.push_str(&clean);
+        kept.push('\n');
+    }
+    kept.into_bytes()
 }
 
 fn repository_root() -> PathBuf {
@@ -159,21 +194,20 @@ fn direct_and_cargo_plugin_check_stubs_are_identical() {
     assert_eq!(direct.status.code(), Some(2));
     assert_eq!(cargo_plugin.status.code(), Some(2));
     assert_eq!(
-        strip_lock_contention_lines(&direct.stderr),
-        strip_lock_contention_lines(&cargo_plugin.stderr)
+        strip_cargo_status_lines(&direct.stderr),
+        strip_cargo_status_lines(&cargo_plugin.stderr)
     );
 }
 
 #[test]
 fn basic_workspace_check_passes_end_to_end() {
     let fixture = basic_fixture_root();
-    let output = cargo_bin_cmd!()
+    let output = depgate()
         .args(["check", "--manifest-path"])
         .arg(fixture.join("Cargo.toml"))
         .arg("--config")
         .arg(fixture.join("depgate.toml"))
         .arg("--offline")
-        .env_remove("RUSTFLAGS")
         .output()
         .expect("cargo-depgate should execute the basic workspace check");
 
@@ -189,13 +223,12 @@ fn basic_workspace_check_passes_end_to_end() {
 #[test]
 fn timings_go_to_stderr_and_the_report_stays_on_stdout() {
     let fixture = basic_fixture_root();
-    let output = cargo_bin_cmd!()
+    let output = depgate()
         .args(["check", "--manifest-path"])
         .arg(fixture.join("Cargo.toml"))
         .arg("--config")
         .arg(fixture.join("depgate.toml"))
         .args(["--offline", "--timings"])
-        .env_remove("RUSTFLAGS")
         .output()
         .expect("cargo-depgate should execute the timed check");
 
@@ -207,7 +240,7 @@ fn timings_go_to_stderr_and_the_report_stays_on_stdout() {
         "the report stream must not carry timings lines: {stdout}"
     );
 
-    let stderr = String::from_utf8_lossy(&strip_lock_contention_lines(&output.stderr)).into_owned();
+    let stderr = String::from_utf8_lossy(&strip_cargo_status_lines(&output.stderr)).into_owned();
     let labels: Vec<&str> = stderr.lines().filter_map(|line| line.split('\t').next()).collect();
     let phases =
         ["read", "parse", "graph", "traversals", "evaluate", "manifest", "report", "total"];
@@ -239,13 +272,12 @@ fn violations_are_reported_with_a_fail_prefix_and_exit_one() {
     )
     .expect("write the violating config");
 
-    let output = cargo_bin_cmd!()
+    let output = depgate()
         .args(["check", "--manifest-path"])
         .arg(fixture.join("Cargo.toml"))
         .arg("--config")
         .arg(&config)
         .arg("--offline")
-        .env_remove("RUSTFLAGS")
         .output()
         .expect("cargo-depgate should execute the violating check");
 
@@ -270,12 +302,11 @@ fn phase_a_configuration_errors_never_spawn_cargo() {
     ] {
         let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
         let marker = temp_dir.path().join("cargo-invoked");
-        let output = cargo_bin_cmd!()
+        let output = depgate()
             .args(["check", "--config"])
             .arg(config_error_fixture_root().join(fixture_name))
             .env("CARGO", fail_cargo_path())
             .env("FAIL_CARGO_MARKER", &marker)
-            .env_remove("RUSTFLAGS")
             .output()
             .expect("cargo-depgate should execute the configuration-error check");
 
@@ -295,13 +326,12 @@ fn phase_a_configuration_errors_never_spawn_cargo() {
 #[test]
 fn phase_b_non_member_error_matches_explicit_and_discovered_config() {
     let fixture = basic_fixture_root();
-    let explicit = cargo_bin_cmd!()
+    let explicit = depgate()
         .args(["check", "--manifest-path"])
         .arg(fixture.join("Cargo.toml"))
         .arg("--config")
         .arg(fixture.join("depgate-bad-rule.toml"))
         .arg("--offline")
-        .env_remove("RUSTFLAGS")
         .output()
         .expect("cargo-depgate should execute the explicit bad-rule check");
     assert_eq!(
@@ -318,11 +348,10 @@ fn phase_b_non_member_error_matches_explicit_and_discovered_config() {
     fs::rename(copied.path().join("depgate-bad-rule.toml"), &discovered_config)
         .expect("copied bad-rule configuration should become the discovered configuration");
 
-    let discovered = cargo_bin_cmd!()
+    let discovered = depgate()
         .args(["check", "--manifest-path"])
         .arg(copied.path().join("Cargo.toml"))
         .arg("--offline")
-        .env_remove("RUSTFLAGS")
         .output()
         .expect("cargo-depgate should execute the discovered bad-rule check");
     assert_eq!(
@@ -335,8 +364,8 @@ fn phase_b_non_member_error_matches_explicit_and_discovered_config() {
     // so the two locations produce byte-identical stderr without path normalization. Cargo may
     // prepend lock-contention diagnostics when the full suite runs concurrently.
     assert_eq!(
-        strip_lock_contention_lines(&explicit.stderr),
-        strip_lock_contention_lines(&discovered.stderr)
+        strip_cargo_status_lines(&explicit.stderr),
+        strip_cargo_status_lines(&discovered.stderr)
     );
 }
 
@@ -351,13 +380,12 @@ fn explicit_config_wins_over_discovered_config() {
     fs::write(&discovered_config, "schema = 2\n")
         .expect("failing discovered configuration should be written");
 
-    let output = cargo_bin_cmd!()
+    let output = depgate()
         .args(["check", "--manifest-path"])
         .arg(copied.path().join("Cargo.toml"))
         .arg("--config")
         .arg(&explicit_config)
         .arg("--offline")
-        .env_remove("RUSTFLAGS")
         .output()
         .expect("cargo-depgate should execute the explicit configuration check");
 
