@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     ffi::OsString,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -15,6 +15,7 @@ use schemars::schema_for;
 use crate::{
     config::ConfigSchema,
     error::Error,
+    manifest,
     metadata::{DEFAULT_TIMEOUT_SECS, MetadataOptions},
     pipeline,
 };
@@ -230,10 +231,12 @@ where
 
 /// Runs a parsed command.
 ///
-/// `check` uses the P2 pipeline and emits its plain placeholder report. The
-/// `--format` value is accepted by the grammar but intentionally ignored until
-/// the P4 human, JSON, and GitHub reporters land. `schema` prints the generated
-/// configuration schema; `explain` remains a named P0 stub.
+/// `check` runs the pipeline and emits its plain placeholder report: one
+/// `ok <id>` / `FAIL <id>: …` line per rule (one line per entry for the manifest
+/// rule) and an `ok:|FAIL: <N> rules, <V> violations` summary. The `--format`
+/// value is accepted by the grammar but intentionally ignored until the P4 human,
+/// JSON, and GitHub reporters land. `schema` prints the generated configuration
+/// schema; `explain` remains a named P0 stub.
 ///
 /// # Errors
 ///
@@ -267,7 +270,7 @@ fn run_check(common: &CommonArgs) -> Result<(), Error> {
     if outcome.exit == 0 {
         Ok(())
     } else {
-        Err(Error::PolicyViolations { count: outcome.violations.len() })
+        Err(Error::PolicyViolations { count: outcome.counters.violations as usize })
     }
 }
 
@@ -296,6 +299,23 @@ fn render_plain_report(outcome: &pipeline::Outcome, out: &mut impl Write) {
             continue;
         }
 
+        if status.kind == manifest::RULE_KIND {
+            for entry in outcome.manifest.iter().flat_map(|report| &report.entries) {
+                drop(writeln!(
+                    out,
+                    "FAIL {}: {}:{}:{} {} {} = {:?}",
+                    status.id,
+                    display_path(&entry.span.file, &outcome.workspace_root),
+                    entry.span.line,
+                    entry.span.col,
+                    entry.table,
+                    entry.dependency,
+                    entry.version
+                ));
+            }
+            continue;
+        }
+
         let violation = violations.get(status.id.as_str()).copied();
         match (status.kind, violation) {
             ("internal" | "leaf" | "direct", Some(violation)) => drop(writeln!(
@@ -316,21 +336,17 @@ fn render_plain_report(outcome: &pipeline::Outcome, out: &mut impl Write) {
         }
     }
 
-    if outcome.violations.is_empty() {
-        drop(writeln!(
-            out,
-            "ok: {} rules, {} violations",
-            outcome.statuses.len(),
-            outcome.violations.len()
-        ));
-    } else {
-        drop(writeln!(
-            out,
-            "FAIL: {} rules, {} violations",
-            outcome.statuses.len(),
-            outcome.violations.len()
-        ));
-    }
+    let verdict = if outcome.counters.violations == 0 { "ok" } else { "FAIL" };
+    drop(writeln!(
+        out,
+        "{verdict}: {} rules, {} violations",
+        outcome.counters.rules, outcome.counters.violations
+    ));
+}
+
+/// Renders `path` relative to `root` when it lies beneath it, else unchanged.
+fn display_path<'a>(path: &'a Path, root: &Path) -> std::path::Display<'a> {
+    path.strip_prefix(root).unwrap_or(path).display()
 }
 
 #[cfg(test)]

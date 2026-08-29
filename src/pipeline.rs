@@ -9,8 +9,9 @@ use crate::{
     config,
     error::Error,
     graph::{Graph, Scratch},
+    manifest::{self, ManifestInput, ManifestReport},
     metadata,
-    rules::{self, Evaluation},
+    rules::{self, Evaluation, RuleStatus},
     timings::{Counters, Phase, Timings},
 };
 
@@ -27,12 +28,20 @@ pub struct CheckArgs {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Outcome {
-    /// The pass/fail status of each configured graph rule.
-    pub statuses: Vec<rules::RuleStatus>,
+    /// The pass/fail status of every rule: the graph rules in configuration order,
+    /// then the manifest rule when it is enabled (`kind == "manifest"`, empty `package`).
+    pub statuses: Vec<RuleStatus>,
     /// The failed graph rules and their witnesses.
     pub violations: Vec<rules::Violation>,
+    /// The manifest rule's entries, or `None` when `versions-in-root = false`.
+    ///
+    /// Kept apart from [`Outcome::violations`] because a manifest entry renders as a
+    /// `file:line:col table dependency = "version"` line, not as a witness path.
+    pub manifest: Option<ManifestReport>,
     /// Non-fatal configuration diagnostics emitted during validation.
     pub warnings: Vec<String>,
+    /// The workspace root reported by `cargo metadata`, for path relativisation.
+    pub workspace_root: PathBuf,
     /// Graph, rule, and metadata counters for this run.
     pub counters: Counters,
     /// Per-phase elapsed time measurements for this run.
@@ -41,7 +50,7 @@ pub struct Outcome {
     pub exit: u8,
 }
 
-/// Loads configuration and metadata, builds the graph, and evaluates graph rules.
+/// Loads configuration and metadata, builds the graph, and evaluates every rule.
 ///
 /// An explicit configuration is loaded and validated once without a graph before
 /// metadata acquisition. This phase-A gate ensures malformed configuration cannot
@@ -49,9 +58,12 @@ pub struct Outcome {
 /// after graph construction. When no path is supplied, configuration discovery is
 /// deferred until the metadata workspace root is known.
 ///
-/// The `manifest.versions-in-root` rule remains a P3 stub. Enabling it returns
-/// [`Error::ManifestRuleNotYetImplemented`] before graph-rule evaluation; disabling it is the
-/// only way to reach the P2 evaluator.
+/// After the graph rules, the `manifest.versions-in-root` rule runs over every
+/// workspace member manifest when it is enabled (the default): it is one more rule
+/// in [`Outcome::statuses`] and in `counters.rules`, it fails once however many
+/// entries it finds (`counters.violations`), and its entries are returned in
+/// [`Outcome::manifest`]. A member manifest that cannot be read or parsed aborts the
+/// run with exit code 3 rather than being skipped.
 ///
 /// Warnings are written verbatim to `stderr` as soon as graph validation produces
 /// them. A write failure is intentionally best effort because the public error
@@ -87,27 +99,50 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
         drop(writeln!(stderr, "{warning}"));
     }
 
-    if validated.config.manifest_versions_in_root {
-        return Err(Error::ManifestRuleNotYetImplemented);
-    }
-
     let mut scratch = Scratch::new(&graph);
-    let evaluation = timings
+    let mut evaluation = timings
         .measure(Phase::Evaluate, || rules::evaluate(&graph, &validated.config, &mut scratch));
+
+    let manifest = if validated.config.manifest_versions_in_root {
+        let members = graph
+            .members()
+            .iter()
+            .map(|&node| ManifestInput::new(graph.name(node), graph.manifest_path(node)));
+        let report =
+            timings.measure(Phase::Manifest, || manifest::check_versions_in_root(members))?;
+        evaluation.statuses.push(manifest_status(&report));
+        Some(report)
+    } else {
+        None
+    };
+
     let counters = counters(&graph, &validated, &evaluation);
 
     timings.measure(Phase::Report, || {});
     timings.finish();
 
-    let exit = u8::from(!evaluation.violations.is_empty());
+    let exit = u8::from(counters.violations > 0);
     Ok(Outcome {
         statuses: evaluation.statuses,
         violations: evaluation.violations,
+        manifest,
         warnings: validated.warnings,
+        workspace_root: PathBuf::from(meta.workspace_root.as_ref()),
         counters,
         timings,
         exit,
     })
+}
+
+/// The manifest rule as one more [`RuleStatus`]: it fails once, `matched` counts entries.
+fn manifest_status(report: &ManifestReport) -> RuleStatus {
+    RuleStatus {
+        id: manifest::RULE_ID.to_owned(),
+        package: String::new(),
+        kind: manifest::RULE_KIND,
+        passed: report.passed(),
+        matched: count(report.entries.len()),
+    }
 }
 
 fn configuration_error(error: config::ConfigError) -> Error {
@@ -118,9 +153,8 @@ fn counters(graph: &Graph<'_>, validated: &config::Validated, evaluation: &Evalu
     let mut counters = graph.counters();
     counters.superset_extra_edges = evaluation.superset_extra_edges;
     counters.direct_optional_decls = validated.direct_optional_decls;
-    // P3: +1 for the manifest rule
     counters.rules = count(evaluation.statuses.len());
-    counters.violations = count(evaluation.violations.len());
+    counters.violations = count(evaluation.statuses.iter().filter(|status| !status.passed).count());
     counters.matches = evaluation.matches;
     counters
 }

@@ -1,0 +1,15 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.dependencies]
+x = { path = "crates/x", version = "0.1.0" }
+
+[dependencies]
+x = { workspace = true }
+y = { path = "crates/y", version = "0.1.0" }

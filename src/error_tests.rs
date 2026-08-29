@@ -15,7 +15,6 @@ fn error_cases() -> Vec<(Error, u8)> {
         (Error::Configuration { message: "invalid rule".to_owned(), span: None }, 2),
         (Error::Usage { message: "missing argument".to_owned() }, 2),
         (Error::NotYetImplemented { subcommand: "check".to_owned() }, 2),
-        (Error::ManifestRuleNotYetImplemented, 2),
         (
             Error::CargoMetadataSpawn {
                 source: io::Error::new(io::ErrorKind::NotFound, "cargo was not found"),
@@ -39,7 +38,28 @@ fn error_cases() -> Vec<(Error, u8)> {
             3,
         ),
         (Error::MetadataInvalid { message: "resolve is null".to_owned() }, 3),
+        (
+            Error::ManifestRead {
+                path: PathBuf::from("crates/app/Cargo.toml"),
+                source: io::Error::new(io::ErrorKind::NotFound, "missing"),
+            },
+            3,
+        ),
+        (
+            Error::ManifestParse {
+                path: PathBuf::from("crates/app/Cargo.toml"),
+                source: invalid_toml_error(),
+            },
+            3,
+        ),
     ]
+}
+
+fn invalid_toml_error() -> toml::de::Error {
+    let Err(error) = toml::from_str::<toml::Table>("= 1") else {
+        panic!("the deliberately keyless TOML unexpectedly parsed successfully");
+    };
+    error
 }
 
 #[test]

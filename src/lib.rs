@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod graph;
+pub mod manifest;
 pub mod metadata;
 pub mod pipeline;
 pub mod rules;

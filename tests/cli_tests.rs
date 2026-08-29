@@ -88,6 +88,18 @@ fn config_error_fixture_root() -> PathBuf {
     repository_root().join("tests/fixtures/ws-config-errors")
 }
 
+/// Runs `check` on a path-only fixture with its own `depgate.toml`, offline.
+fn fixture_check(fixture: &Path) -> Output {
+    depgate()
+        .args(["check", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .arg("--config")
+        .arg(fixture.join("depgate.toml"))
+        .arg("--offline")
+        .output()
+        .expect("cargo-depgate should execute the fixture check")
+}
+
 fn fail_cargo_path() -> PathBuf {
     repository_root().join("tests/bin/fail-cargo")
 }
@@ -215,7 +227,7 @@ fn basic_workspace_check_passes_end_to_end() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         stdout.lines().last(),
-        Some("ok: 7 rules, 0 violations"),
+        Some("ok: 8 rules, 0 violations"),
         "unexpected basic workspace report: {stdout}"
     );
 }
@@ -234,7 +246,7 @@ fn timings_go_to_stderr_and_the_report_stays_on_stdout() {
 
     assert_eq!(output.status.code(), Some(0), "timed check failed: {output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout.lines().last(), Some("ok: 7 rules, 0 violations"));
+    assert_eq!(stdout.lines().last(), Some("ok: 8 rules, 0 violations"));
     assert!(
         !stdout.lines().any(|line| line.contains('\t')),
         "the report stream must not carry timings lines: {stdout}"
@@ -258,7 +270,7 @@ fn timings_go_to_stderr_and_the_report_stays_on_stdout() {
     ];
     let expected: Vec<&str> = phases.iter().chain(counters.iter()).copied().collect();
     assert_eq!(labels, expected, "unexpected --timings stream: {stderr}");
-    assert!(stderr.lines().any(|line| line == "rules\t7"), "rules counter missing: {stderr}");
+    assert!(stderr.lines().any(|line| line == "rules\t8"), "rules counter missing: {stderr}");
 }
 
 #[test]
@@ -407,4 +419,43 @@ fn schema_outputs_valid_json() {
         schema.get("$defs").is_some() || schema.get("properties").is_some(),
         "schema output has no top-level definitions or properties: {schema}"
     );
+}
+
+#[test]
+fn manifest_fixture_reports_each_version_with_its_position_and_exits_one() {
+    let output = fixture_check(&repository_root().join("tests/fixtures/ws-manifest"));
+
+    assert_eq!(output.status.code(), Some(1), "manifest violations must exit 1: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let manifest_lines: Vec<&str> =
+        stdout.lines().filter(|line| line.starts_with("FAIL manifest.versions-in-root:")).collect();
+    assert_eq!(
+        manifest_lines,
+        vec![
+            "FAIL manifest.versions-in-root: crates/app/Cargo.toml:7:36 dependencies foo = \"0.1.0\"",
+            "FAIL manifest.versions-in-root: crates/app/Cargo.toml:12:36 dev-dependencies bar = \"0.1.0\"",
+            "FAIL manifest.versions-in-root: crates/app/Cargo.toml:19:36 target.'cfg(unix)'.dependencies baz = \"0.1.0\"",
+        ],
+        "{stdout}"
+    );
+    assert!(stdout.lines().any(|line| line == "ok rules.app.deny"), "{stdout}");
+    assert_eq!(stdout.lines().last(), Some("FAIL: 2 rules, 1 violations"), "{stdout}");
+}
+
+#[test]
+fn root_package_fixture_flags_the_root_dependencies_but_never_the_workspace_table() {
+    let output = fixture_check(&repository_root().join("tests/fixtures/ws-rootpkg"));
+
+    assert_eq!(output.status.code(), Some(1), "the root dependency must exit 1: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let manifest_lines: Vec<&str> =
+        stdout.lines().filter(|line| line.starts_with("FAIL manifest.versions-in-root:")).collect();
+    assert_eq!(
+        manifest_lines,
+        vec!["FAIL manifest.versions-in-root: Cargo.toml:15:36 dependencies y = \"0.1.0\""],
+        "{stdout}"
+    );
+    assert!(!stdout.contains(" x = "), "the workspace table must never be flagged: {stdout}");
+    assert!(stdout.lines().any(|line| line == "ok rules.y.leaf"), "{stdout}");
+    assert_eq!(stdout.lines().last(), Some("FAIL: 2 rules, 1 violations"), "{stdout}");
 }

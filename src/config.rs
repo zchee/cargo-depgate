@@ -890,7 +890,11 @@ fn config_span(cfg: &RawConfig, offset: usize) -> Span {
     }
 }
 
-fn source_span(path: &Path, text: &str, offset: usize) -> Span {
+/// Converts a byte `offset` into `text` to a 1-based line and character column.
+///
+/// Offsets past the end clamp to the end of `text`; the column counts `char`s from the
+/// preceding newline, so multi-byte UTF-8 before the offset does not inflate it.
+pub(crate) fn source_span(path: &Path, text: &str, offset: usize) -> Span {
     let offset = offset.min(text.len());
     let line = text[..offset].bytes().filter(|&byte| byte == b'\n').count() + 1;
     let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);

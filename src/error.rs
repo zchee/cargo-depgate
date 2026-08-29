@@ -37,13 +37,6 @@ pub enum Error {
         subcommand: String,
     },
 
-    /// The manifest `versions-in-root` rule remains a P3 stub.
-    #[error(
-        "the manifest.versions-in-root rule is not implemented yet (P3); \
-         set versions-in-root = false to run the graph rules"
-    )]
-    ManifestRuleNotYetImplemented,
-
     /// Spawning the `cargo metadata` child process failed.
     #[error("failed to spawn cargo metadata")]
     CargoMetadataSpawn {
@@ -98,6 +91,27 @@ pub enum Error {
         source: io::Error,
     },
 
+    /// Reading a workspace member manifest for the `manifest.versions-in-root` rule failed.
+    #[error("failed to read workspace member manifest {}", path.display())]
+    ManifestRead {
+        /// The member manifest that was being read.
+        path: PathBuf,
+        /// The operating-system error returned while reading.
+        #[source]
+        source: io::Error,
+    },
+
+    /// A workspace member manifest is not valid TOML, or a dependency entry has a shape
+    /// Cargo would reject (neither a string nor a table).
+    #[error("failed to parse workspace member manifest {}", path.display())]
+    ManifestParse {
+        /// The member manifest that was being parsed.
+        path: PathBuf,
+        /// The TOML error, which renders the offending line and column.
+        #[source]
+        source: toml::de::Error,
+    },
+
     /// The metadata parsed, but violates an invariant the policy engine relies on.
     ///
     /// These are the fail-closed input checks: a missing `resolve`, an edge without
@@ -118,17 +132,16 @@ impl Error {
     pub const fn exit_code(&self) -> u8 {
         match self {
             Self::PolicyViolations { .. } => 1,
-            Self::Configuration { .. }
-            | Self::Usage { .. }
-            | Self::NotYetImplemented { .. }
-            | Self::ManifestRuleNotYetImplemented => 2,
+            Self::Configuration { .. } | Self::Usage { .. } | Self::NotYetImplemented { .. } => 2,
             Self::CargoMetadataSpawn { .. }
             | Self::CargoMetadataTimeout { .. }
             | Self::CargoMetadataRead { .. }
             | Self::CargoMetadataFailed { .. }
             | Self::CargoMetadataUnparseable { .. }
             | Self::MetadataRead { .. }
-            | Self::MetadataInvalid { .. } => 3,
+            | Self::MetadataInvalid { .. }
+            | Self::ManifestRead { .. }
+            | Self::ManifestParse { .. } => 3,
         }
     }
 }

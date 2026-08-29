@@ -181,17 +181,93 @@ fn missing_discovered_config_names_absolute_path() {
     assert!(stderr.is_empty());
 }
 
+fn write_app_manifest(root: &Path, dependencies: &str) {
+    fs::create_dir_all(root.join("app")).expect("app directory should be creatable");
+    write(
+        &root.join("app/Cargo.toml"),
+        &format!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n{dependencies}"
+        ),
+    );
+}
+
 #[test]
-fn manifest_versions_in_root_returns_p3_stub() {
+fn manifest_rule_alone_is_one_rule_and_passes_on_a_clean_member() {
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let config_path = temp.path().join("depgate.toml");
+    write(&config_path, "schema = 1\n");
+    write_app_manifest(temp.path(), "dep = { workspace = true, optional = true }\n");
+
+    let (result, stderr) = run_check(&args(temp.path(), Some(config_path)));
+    let outcome = result.expect("a clean member manifest passes the manifest rule");
+
+    assert_eq!(outcome.exit, 0);
+    assert_eq!(outcome.statuses.len(), 1);
+    assert_eq!(outcome.statuses[0].id, "manifest.versions-in-root");
+    assert_eq!(outcome.statuses[0].kind, "manifest");
+    assert_eq!(outcome.statuses[0].package, "");
+    assert!(outcome.statuses[0].passed);
+    assert_eq!(outcome.statuses[0].matched, 0);
+    assert!(outcome.violations.is_empty());
+    let report = outcome.manifest.as_ref().expect("the enabled rule returns its report");
+    assert!(report.passed());
+    assert_eq!(report.manifests_scanned, 1);
+    assert_eq!(outcome.workspace_root, temp.path());
+    assert_eq!(outcome.counters.rules, 1);
+    assert_eq!(outcome.counters.violations, 0);
+    assert!(outcome.timings.millis(Phase::Manifest) > 0.0, "the manifest phase must be timed");
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn manifest_entries_fail_the_rule_once_after_the_graph_rules() {
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let config_path = temp.path().join("depgate.toml");
+    write(&config_path, "schema = 1\n\n[rules.app]\nleaf = true\n");
+    write_app_manifest(
+        temp.path(),
+        "dep = { version = \"1.0\", optional = true }\nother = { path = \"../other\" }\n",
+    );
+
+    let (result, stderr) = run_check(&args(temp.path(), Some(config_path)));
+    let outcome = result.expect("manifest entries are returned as an outcome");
+
+    assert_eq!(outcome.exit, 1);
+    let ids: Vec<&str> = outcome.statuses.iter().map(|status| status.id.as_str()).collect();
+    assert_eq!(ids, vec!["rules.app.leaf", "manifest.versions-in-root"]);
+    assert!(outcome.statuses[0].passed);
+    assert!(!outcome.statuses[1].passed);
+    assert_eq!(outcome.statuses[1].matched, 1);
+    assert!(outcome.violations.is_empty(), "graph violations stay graph-only");
+    let report = outcome.manifest.as_ref().expect("the enabled rule returns its report");
+    assert_eq!(report.entries.len(), 1);
+    let entry = &report.entries[0];
+    assert_eq!(entry.package, "app");
+    assert_eq!(entry.table, "dependencies");
+    assert_eq!(entry.dependency, "dep");
+    assert_eq!(entry.version, "1.0");
+    assert_eq!(entry.span.file, temp.path().join("app/Cargo.toml"));
+    assert_eq!((entry.span.line, entry.span.col), (6, 19));
+    assert_eq!(outcome.counters.rules, 2);
+    assert_eq!(outcome.counters.violations, 1);
+    assert_eq!(outcome.counters.matches, 0, "manifest entries are not graph matches");
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn a_missing_member_manifest_aborts_with_exit_3() {
     let temp = tempdir().expect("temporary pipeline directory should be creatable");
     let config_path = temp.path().join("depgate.toml");
     write(&config_path, "schema = 1\n");
 
     let (result, stderr) = run_check(&args(temp.path(), Some(config_path)));
 
-    let error = result.expect_err("the P3 manifest rule must fail loudly");
-    assert!(matches!(error, Error::ManifestRuleNotYetImplemented));
-    assert_eq!(error.exit_code(), 2);
+    let error = result.expect_err("an unreadable member manifest must not be skipped");
+    assert!(
+        matches!(&error, Error::ManifestRead { path, .. } if path == &temp.path().join("app/Cargo.toml")),
+        "{error:?}"
+    );
+    assert_eq!(error.exit_code(), 3);
     assert!(stderr.is_empty());
 }
 
@@ -227,6 +303,7 @@ fn passing_direct_rule_populates_counters_and_warning() {
             matches: 0,
         }
     );
+    assert!(outcome.manifest.is_none(), "versions-in-root = false must skip the manifest rule");
     let warning = "warning: rules.app.direct: app declares optional dependency dep; sibling feature unification may add it to the resolved edge set\n";
     assert_eq!(outcome.warnings, vec![warning.trim_end().to_owned()]);
     assert_eq!(stderr, warning);

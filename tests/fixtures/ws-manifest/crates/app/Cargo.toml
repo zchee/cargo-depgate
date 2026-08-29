@@ -1,0 +1,19 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+foo = { path = "../foo", version = "0.1.0" }
+plain = { path = "../plain" }
+util = { workspace = true }
+
+[dev-dependencies]
+bar = { path = "../bar", version = "0.1.0" }
+
+[[test]]
+name = "smoke"
+harness = false
+
+[target.'cfg(unix)'.dependencies]
+baz = { path = "../baz", version = "0.1.0", optional = true }
