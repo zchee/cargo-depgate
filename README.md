@@ -287,8 +287,9 @@ split on the tab.
 
 `cargo-depgate` walks the workspace-unified, all-platform resolve, while `cargo tree -p M -e normal`
 shows one member on one host with that member's own features. The difference is measured, not
-assumed. The rows below are `ganja-code@153bfb1` on host **`aarch64-apple-darwin`** (rustc 1.98.0,
-cargo 1.98.0); both columns count distinct reachable package names and exclude the member itself.
+assumed. The rows below are [zchee/ganja-code@153bfb1](https://github.com/zchee/ganja-code/tree/153bfb1) 
+on host **`aarch64-apple-darwin`** (rustc 1.98.0, cargo 1.98.0); both columns count distinct reachable
+package names and exclude the member itself.
 
 | member | `cargo tree` | depgate closure | `+extra` | extra internal |
 |---|---:|---:|---:|---:|
