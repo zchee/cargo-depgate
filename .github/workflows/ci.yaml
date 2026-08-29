@@ -25,7 +25,9 @@ jobs:
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo nextest run --locked --all-features
       - run: cargo test --doc --locked
-      - run: RUSTDOCFLAGS=-D warnings cargo doc --no-deps --locked
+      - run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
       - run: cargo deny check
 
   nightly:
