@@ -152,22 +152,21 @@ fn help_uses_the_cargo_subcommand_name() {
 }
 
 #[test]
-fn every_p0_subcommand_returns_its_named_stub_error() {
-    for (arguments, expected_name) in [
-        (&["cargo-depgate"][..], "check"),
-        (&["cargo-depgate", "--offline"][..], "check"),
-        (&["cargo-depgate", "check"][..], "check"),
-        (&["cargo-depgate", "explain", "package", "dependency"][..], "explain"),
-        (&["cargo-depgate", "schema"][..], "schema"),
-    ] {
-        let args = parse(arguments);
-        let error = run(&args).expect_err("P0 commands must remain parse-only stubs");
+fn explain_remains_its_named_stub_error() {
+    let args = parse(&["cargo-depgate", "explain", "package", "dependency"]);
+    let error = run(&args).expect_err("explain remains a P0 stub");
 
-        assert!(matches!(
-            error,
-            Error::NotYetImplemented { ref subcommand } if subcommand == expected_name
-        ));
-    }
+    assert!(matches!(
+        error,
+        Error::NotYetImplemented { ref subcommand } if subcommand == "explain"
+    ));
+}
+
+#[test]
+fn schema_is_implemented() {
+    let args = parse(&["cargo-depgate", "schema"]);
+
+    run(&args).expect("schema should render successfully");
 }
 
 #[test]

@@ -18,6 +18,8 @@ pub enum Error {
     Configuration {
         /// A description of the configuration problem.
         message: String,
+        /// The source location of the configuration problem, when available.
+        span: Option<crate::config::Span>,
     },
 
     /// The requested command or arguments are invalid.
@@ -34,6 +36,13 @@ pub enum Error {
         /// The subcommand whose implementation has not landed yet.
         subcommand: String,
     },
+
+    /// The manifest `versions-in-root` rule remains a P3 stub.
+    #[error(
+        "the manifest.versions-in-root rule is not implemented yet (P3); \
+         set versions-in-root = false to run the graph rules"
+    )]
+    ManifestRuleNotYetImplemented,
 
     /// Spawning the `cargo metadata` child process failed.
     #[error("failed to spawn cargo metadata")]
@@ -109,7 +118,10 @@ impl Error {
     pub const fn exit_code(&self) -> u8 {
         match self {
             Self::PolicyViolations { .. } => 1,
-            Self::Configuration { .. } | Self::Usage { .. } | Self::NotYetImplemented { .. } => 2,
+            Self::Configuration { .. }
+            | Self::Usage { .. }
+            | Self::NotYetImplemented { .. }
+            | Self::ManifestRuleNotYetImplemented => 2,
             Self::CargoMetadataSpawn { .. }
             | Self::CargoMetadataTimeout { .. }
             | Self::CargoMetadataRead { .. }

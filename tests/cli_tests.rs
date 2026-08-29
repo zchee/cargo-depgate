@@ -1,12 +1,90 @@
 //! Binary-level contract tests for the P0 command-line scaffold.
 #![expect(clippy::expect_used, reason = "test bodies assert directly")]
 
-use std::process::Output;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Output,
+};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 
 fn output(arguments: &[&str]) -> Output {
-    cargo_bin_cmd!().args(arguments).output().expect("cargo-depgate should execute")
+    cargo_bin_cmd!()
+        .args(arguments)
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("cargo-depgate should execute")
+}
+
+/// Removes Cargo's optional diagnostics when another real Cargo process owns its package lock.
+fn strip_lock_contention_lines(stderr: &[u8]) -> Vec<u8> {
+    let mut offset = 0;
+
+    for line in stderr.split_inclusive(|byte| *byte == b'\n') {
+        let line_without_newline = line.strip_suffix(b"\n").unwrap_or(line);
+        let line_without_newline =
+            line_without_newline.strip_suffix(b"\r").unwrap_or(line_without_newline);
+        let first_non_whitespace = line_without_newline
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(line_without_newline.len());
+
+        if !line_without_newline[first_non_whitespace..]
+            .starts_with(b"Blocking waiting for file lock")
+        {
+            break;
+        }
+        offset += line.len();
+    }
+
+    stderr[offset..].to_vec()
+}
+
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn basic_fixture_root() -> PathBuf {
+    repository_root().join("tests/fixtures/ws-basic")
+}
+
+fn config_error_fixture_root() -> PathBuf {
+    repository_root().join("tests/fixtures/ws-config-errors")
+}
+
+fn fail_cargo_path() -> PathBuf {
+    repository_root().join("tests/bin/fail-cargo")
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", destination.display()));
+
+    for entry in fs::read_dir(source)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", source.display()))
+    {
+        let entry = entry.expect("fixture directory entry should be readable");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", source_path.display()));
+
+        if file_type.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to copy {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        } else {
+            panic!("fixture entry {} is not a regular file or directory", source_path.display());
+        }
+    }
 }
 
 #[test]
@@ -80,5 +158,225 @@ fn direct_and_cargo_plugin_check_stubs_are_identical() {
 
     assert_eq!(direct.status.code(), Some(2));
     assert_eq!(cargo_plugin.status.code(), Some(2));
-    assert_eq!(direct.stderr, cargo_plugin.stderr);
+    assert_eq!(
+        strip_lock_contention_lines(&direct.stderr),
+        strip_lock_contention_lines(&cargo_plugin.stderr)
+    );
+}
+
+#[test]
+fn basic_workspace_check_passes_end_to_end() {
+    let fixture = basic_fixture_root();
+    let output = cargo_bin_cmd!()
+        .args(["check", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .arg("--config")
+        .arg(fixture.join("depgate.toml"))
+        .arg("--offline")
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("cargo-depgate should execute the basic workspace check");
+
+    assert_eq!(output.status.code(), Some(0), "basic workspace check failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.lines().last(),
+        Some("ok: 7 rules, 0 violations"),
+        "unexpected basic workspace report: {stdout}"
+    );
+}
+
+#[test]
+fn timings_go_to_stderr_and_the_report_stays_on_stdout() {
+    let fixture = basic_fixture_root();
+    let output = cargo_bin_cmd!()
+        .args(["check", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .arg("--config")
+        .arg(fixture.join("depgate.toml"))
+        .args(["--offline", "--timings"])
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("cargo-depgate should execute the timed check");
+
+    assert_eq!(output.status.code(), Some(0), "timed check failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.lines().last(), Some("ok: 7 rules, 0 violations"));
+    assert!(
+        !stdout.lines().any(|line| line.contains('\t')),
+        "the report stream must not carry timings lines: {stdout}"
+    );
+
+    let stderr = String::from_utf8_lossy(&strip_lock_contention_lines(&output.stderr)).into_owned();
+    let labels: Vec<&str> = stderr.lines().filter_map(|line| line.split('\t').next()).collect();
+    let phases =
+        ["read", "parse", "graph", "traversals", "evaluate", "manifest", "report", "total"];
+    let counters = [
+        "packages",
+        "members",
+        "normal_edges",
+        "names",
+        "superset_extra_edges",
+        "direct_optional_decls",
+        "unrebased_path_deps",
+        "rules",
+        "violations",
+        "matches",
+    ];
+    let expected: Vec<&str> = phases.iter().chain(counters.iter()).copied().collect();
+    assert_eq!(labels, expected, "unexpected --timings stream: {stderr}");
+    assert!(stderr.lines().any(|line| line == "rules\t7"), "rules counter missing: {stderr}");
+}
+
+#[test]
+fn violations_are_reported_with_a_fail_prefix_and_exit_one() {
+    let fixture = basic_fixture_root();
+    let scratch = tempfile::tempdir().expect("temporary directory");
+    let config = scratch.path().join("depgate.toml");
+    std::fs::write(
+        &config,
+        "schema = 1\n[manifest]\nversions-in-root = false\n[rules.app]\nleaf = true\n[rules.tool]\ndirect = [\"core\"]\n",
+    )
+    .expect("write the violating config");
+
+    let output = cargo_bin_cmd!()
+        .args(["check", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--offline")
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("cargo-depgate should execute the violating check");
+
+    assert_eq!(output.status.code(), Some(1), "a violation must exit 1: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.lines().any(|line| line.starts_with("FAIL rules.app.leaf:")),
+        "leaf violation line missing: {stdout}"
+    );
+    assert!(stdout.lines().any(|line| line == "ok rules.tool.direct"), "{stdout}");
+    assert_eq!(stdout.lines().last(), Some("FAIL: 2 rules, 1 violations"), "{stdout}");
+}
+
+#[test]
+fn phase_a_configuration_errors_never_spawn_cargo() {
+    for fixture_name in [
+        "unknown-key.toml",
+        "zero-rules.toml",
+        "leaf-and-internal.toml",
+        "self-reference.toml",
+        "bad-glob.toml",
+    ] {
+        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let marker = temp_dir.path().join("cargo-invoked");
+        let output = cargo_bin_cmd!()
+            .args(["check", "--config"])
+            .arg(config_error_fixture_root().join(fixture_name))
+            .env("CARGO", fail_cargo_path())
+            .env("FAIL_CARGO_MARKER", &marker)
+            .env_remove("RUSTFLAGS")
+            .output()
+            .expect("cargo-depgate should execute the configuration-error check");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "phase-A fixture {fixture_name} returned unexpected output: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).starts_with("configuration error:"),
+            "phase-A fixture {fixture_name} did not report a configuration error: {output:?}"
+        );
+        assert!(!marker.exists(), "phase-A fixture {fixture_name} spawned cargo");
+    }
+}
+
+#[test]
+fn phase_b_non_member_error_matches_explicit_and_discovered_config() {
+    let fixture = basic_fixture_root();
+    let explicit = cargo_bin_cmd!()
+        .args(["check", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .arg("--config")
+        .arg(fixture.join("depgate-bad-rule.toml"))
+        .arg("--offline")
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("cargo-depgate should execute the explicit bad-rule check");
+    assert_eq!(
+        explicit.status.code(),
+        Some(2),
+        "explicit bad-rule check did not fail: {explicit:?}"
+    );
+
+    let copied = tempfile::tempdir().expect("temporary directory should be created");
+    copy_tree(&fixture, copied.path());
+    let discovered_config = copied.path().join("depgate.toml");
+    fs::remove_file(&discovered_config)
+        .expect("copied passing configuration should be present before replacement");
+    fs::rename(copied.path().join("depgate-bad-rule.toml"), &discovered_config)
+        .expect("copied bad-rule configuration should become the discovered configuration");
+
+    let discovered = cargo_bin_cmd!()
+        .args(["check", "--manifest-path"])
+        .arg(copied.path().join("Cargo.toml"))
+        .arg("--offline")
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("cargo-depgate should execute the discovered bad-rule check");
+    assert_eq!(
+        discovered.status.code(),
+        Some(2),
+        "discovered bad-rule check did not fail: {discovered:?}"
+    );
+
+    // Error::Configuration displays ConfigError.message only; its source Span path is not rendered,
+    // so the two locations produce byte-identical stderr without path normalization. Cargo may
+    // prepend lock-contention diagnostics when the full suite runs concurrently.
+    assert_eq!(
+        strip_lock_contention_lines(&explicit.stderr),
+        strip_lock_contention_lines(&discovered.stderr)
+    );
+}
+
+#[test]
+fn explicit_config_wins_over_discovered_config() {
+    let copied = tempfile::tempdir().expect("temporary directory should be created");
+    copy_tree(&basic_fixture_root(), copied.path());
+    let discovered_config = copied.path().join("depgate.toml");
+    let explicit_config = copied.path().join("depgate-good.toml");
+    fs::rename(&discovered_config, &explicit_config)
+        .expect("copied passing configuration should be preserved for explicit use");
+    fs::write(&discovered_config, "schema = 2\n")
+        .expect("failing discovered configuration should be written");
+
+    let output = cargo_bin_cmd!()
+        .args(["check", "--manifest-path"])
+        .arg(copied.path().join("Cargo.toml"))
+        .arg("--config")
+        .arg(&explicit_config)
+        .arg("--offline")
+        .env_remove("RUSTFLAGS")
+        .output()
+        .expect("cargo-depgate should execute the explicit configuration check");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "explicit configuration did not override discovered configuration: {output:?}"
+    );
+}
+
+#[test]
+fn schema_outputs_valid_json() {
+    let output = output(&["schema"]);
+
+    assert!(output.status.success(), "schema command failed: {output:?}");
+    let schema: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("schema output should be valid JSON");
+    assert!(
+        schema.get("$defs").is_some() || schema.get("properties").is_some(),
+        "schema output has no top-level definitions or properties: {schema}"
+    );
 }

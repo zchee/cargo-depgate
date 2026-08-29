@@ -1,13 +1,22 @@
-//! Command-line grammar and P0 command dispatch.
+//! Command-line grammar and command dispatch.
 
-use std::{ffi::OsString, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    io::{self, Write},
+    path::PathBuf,
+    time::Duration,
+};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum, builder::TypedValueParser as _};
 use clap_cargo::{Features, Manifest, style::CLAP_STYLING};
+use schemars::schema_for;
 
 use crate::{
+    config::ConfigSchema,
     error::Error,
     metadata::{DEFAULT_TIMEOUT_SECS, MetadataOptions},
+    pipeline,
 };
 
 /// Parsed command-line arguments for `cargo depgate`.
@@ -221,18 +230,107 @@ where
 
 /// Runs a parsed command.
 ///
+/// `check` uses the P2 pipeline and emits its plain placeholder report. The
+/// `--format` value is accepted by the grammar but intentionally ignored until
+/// the P4 human, JSON, and GitHub reporters land. `schema` prints the generated
+/// configuration schema; `explain` remains a named P0 stub.
+///
 /// # Errors
 ///
-/// P0 returns [`Error::NotYetImplemented`] for every subcommand. P1, P2, and
-/// P4 replace these stubs with the corresponding behavior.
+/// Returns pipeline errors unchanged. A completed check with violations is
+/// converted to [`Error::PolicyViolations`] so the process receives exit code 1.
 pub fn run(args: &Args) -> Result<(), Error> {
-    let subcommand = match &args.command {
-        None | Some(Command::Check(_)) => "check",
-        Some(Command::Explain(_)) => "explain",
-        Some(Command::Schema) => "schema",
-    };
+    match &args.command {
+        None => run_check(&args.check),
+        Some(Command::Check(common)) => run_check(common),
+        Some(Command::Explain(_)) => {
+            Err(Error::NotYetImplemented { subcommand: "explain".to_owned() })
+        }
+        Some(Command::Schema) => run_schema(),
+    }
+}
 
-    Err(Error::NotYetImplemented { subcommand: subcommand.to_owned() })
+fn run_check(common: &CommonArgs) -> Result<(), Error> {
+    let check_args = pipeline::CheckArgs {
+        metadata: common.metadata_options(),
+        config_path: common.config.clone(),
+    };
+    let mut stderr = io::stderr();
+    let outcome = pipeline::check(&check_args, &mut stderr)?;
+
+    let mut stdout = io::stdout();
+    render_plain_report(&outcome, &mut stdout);
+    if common.timings {
+        drop(outcome.timings.write_to(&outcome.counters, &mut stderr));
+    }
+
+    if outcome.exit == 0 {
+        Ok(())
+    } else {
+        Err(Error::PolicyViolations { count: outcome.violations.len() })
+    }
+}
+
+fn run_schema() -> Result<(), Error> {
+    let schema = schema_for!(ConfigSchema).to_value();
+    let rendered =
+        serde_json::to_string_pretty(&schema).map_err(|source| Error::Configuration {
+            message: format!("failed to serialize configuration schema: {source}"),
+            span: None,
+        })?;
+    let mut stdout = io::stdout();
+    drop(writeln!(stdout, "{rendered}"));
+    Ok(())
+}
+
+fn render_plain_report(outcome: &pipeline::Outcome, out: &mut impl Write) {
+    let violations = outcome
+        .violations
+        .iter()
+        .map(|violation| (violation.rule_id.as_str(), violation))
+        .collect::<HashMap<_, _>>();
+
+    for status in &outcome.statuses {
+        if status.passed {
+            drop(writeln!(out, "ok {}", status.id));
+            continue;
+        }
+
+        let violation = violations.get(status.id.as_str()).copied();
+        match (status.kind, violation) {
+            ("internal" | "leaf" | "direct", Some(violation)) => drop(writeln!(
+                out,
+                "FAIL {}: {} match(es), +{} extra, -{} missing",
+                status.id,
+                status.matched,
+                violation.extra.len(),
+                violation.missing.len()
+            )),
+            ("sealed", Some(violation)) => drop(writeln!(
+                out,
+                "FAIL {}: consumed by {} member(s)",
+                status.id,
+                violation.sealed_by.len()
+            )),
+            _ => drop(writeln!(out, "FAIL {}: {} match(es)", status.id, status.matched)),
+        }
+    }
+
+    if outcome.violations.is_empty() {
+        drop(writeln!(
+            out,
+            "ok: {} rules, {} violations",
+            outcome.statuses.len(),
+            outcome.violations.len()
+        ));
+    } else {
+        drop(writeln!(
+            out,
+            "FAIL: {} rules, {} violations",
+            outcome.statuses.len(),
+            outcome.violations.len()
+        ));
+    }
 }
 
 #[cfg(test)]

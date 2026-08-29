@@ -1,0 +1,5 @@
+#!/bin/sh
+if [ -n "$FAIL_CARGO_MARKER" ]; then
+    echo "INVOKED" > "$FAIL_CARGO_MARKER"
+fi
+exit 99

@@ -1,0 +1,20 @@
+schema = 1
+
+[graph]
+features = "all"
+
+[internal]
+members = false
+patterns = ["workspace-*"]
+
+[manifest]
+versions-in-root = false
+
+[rules."workspace-app"]
+deny = ["openssl", "ring*"]
+internal = ["workspace-core"]
+direct = ["serde"]
+sealed = true
+
+[rules."workspace-core"]
+leaf = true

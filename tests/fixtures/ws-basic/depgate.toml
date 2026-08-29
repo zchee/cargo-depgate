@@ -1,0 +1,19 @@
+schema = 1
+
+[manifest]
+versions-in-root = false  # P3 removes this line once the manifest rule ships
+
+[rules.app]
+deny = ["nonexistent-*"]
+internal = ["core", "util"]
+
+[rules.core]
+internal = ["util"]
+
+[rules.util]
+leaf = true
+direct = []
+
+[rules.tool]
+direct = ["core"]
+sealed = true

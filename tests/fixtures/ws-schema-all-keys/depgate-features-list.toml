@@ -1,0 +1,4 @@
+schema = 1
+
+[graph]
+features = ["workspace-app/metrics"]

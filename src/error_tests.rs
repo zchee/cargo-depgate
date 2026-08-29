@@ -12,9 +12,10 @@ fn invalid_json_error() -> serde_json::Error {
 fn error_cases() -> Vec<(Error, u8)> {
     vec![
         (Error::PolicyViolations { count: 2 }, 1),
-        (Error::Configuration { message: "invalid rule".to_owned() }, 2),
+        (Error::Configuration { message: "invalid rule".to_owned(), span: None }, 2),
         (Error::Usage { message: "missing argument".to_owned() }, 2),
         (Error::NotYetImplemented { subcommand: "check".to_owned() }, 2),
+        (Error::ManifestRuleNotYetImplemented, 2),
         (
             Error::CargoMetadataSpawn {
                 source: io::Error::new(io::ErrorKind::NotFound, "cargo was not found"),

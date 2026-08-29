@@ -34,10 +34,15 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 fixedbitset = "0.5.7"
 rustc-hash = "2.1.3"
+toml = { version = "1.1.4", features = ["preserve_order"] }
+globset = "0.4.20"
+schemars = "1.2.2"
+indexmap = { version = "2.14.1", features = ["serde"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
 guppy = "0.18.0"
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "deny"
