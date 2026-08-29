@@ -5,9 +5,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::{Duration, Instant},
 };
 
 use assert_cmd::cargo::cargo_bin_cmd;
+use flate2::read::GzDecoder;
 
 /// The binary under test with Cargo's colour output disabled so the child's inherited
 /// stderr carries no ANSI escapes (CI sets `CARGO_TERM_COLOR=always`).
@@ -91,6 +93,14 @@ fn basic_fixture_root() -> PathBuf {
 
 fn violations_fixture_root() -> PathBuf {
     repository_root().join("tests/fixtures/ws-violations")
+}
+
+fn ganja_fixture_root() -> PathBuf {
+    repository_root().join("tests/fixtures/ganja-code-153bfb1")
+}
+
+fn ganja_config_path() -> PathBuf {
+    repository_root().join("tests/fixtures/ganja-code.depgate.toml")
 }
 
 fn config_error_fixture_root() -> PathBuf {
@@ -204,6 +214,81 @@ fn copy_tree(source: &Path, destination: &Path) {
             panic!("fixture entry {} is not a regular file or directory", source_path.display());
         }
     }
+}
+
+/// Captures one fixture's live `cargo metadata` document for mutation/replay tests.
+fn live_metadata(fixture: &Path, no_deps: bool) -> serde_json::Value {
+    let mut command = Command::new("cargo");
+    command.env_remove("RUSTFLAGS").env("CARGO_TERM_COLOR", "never");
+    command.args(["metadata", "--format-version", "1"]);
+    if no_deps {
+        command.arg("--no-deps");
+    }
+    let output = command
+        .args(["--offline", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .output()
+        .expect("cargo metadata should execute");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("cargo metadata should emit JSON")
+}
+
+fn write_metadata_json(directory: &Path, metadata: &serde_json::Value) -> PathBuf {
+    let path = directory.join("metadata.json");
+    let bytes = serde_json::to_vec(metadata).expect("metadata JSON should serialize");
+    fs::write(&path, bytes).expect("metadata JSON should be writable");
+    path
+}
+
+fn metadata_check(
+    metadata: &Path,
+    config: &Path,
+    workspace_root: Option<&Path>,
+    options: &[&str],
+) -> Output {
+    let mut command = depgate();
+    command.args(["check", "--metadata-json"]).arg(metadata);
+    if let Some(workspace_root) = workspace_root {
+        command.args(["--workspace-root"]).arg(workspace_root);
+    }
+    command.arg("--config").arg(config).args(options);
+    command.output().expect("cargo-depgate should execute metadata-backed check")
+}
+
+/// Decompresses the committed ganja-code metadata into a temporary file.
+fn ganja_metadata_json() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = temp.path().join("metadata.json");
+    let compressed = fs::File::open(ganja_fixture_root().join("metadata.json.gz"))
+        .expect("ganja metadata fixture should be readable");
+    let mut decoder = GzDecoder::new(compressed);
+    let mut metadata = fs::File::create(&metadata_path).expect("metadata JSON should be writable");
+    std::io::copy(&mut decoder, &mut metadata).expect("ganja metadata should decompress");
+    (temp, metadata_path)
+}
+
+fn first_dependency_mut(metadata: &mut serde_json::Value) -> &mut serde_json::Value {
+    let nodes = metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .expect("live metadata should contain resolve nodes");
+    let node = nodes
+        .iter_mut()
+        .find(|node| node["deps"].as_array().is_some_and(|deps| !deps.is_empty()))
+        .expect("live metadata should contain a dependency");
+    node["deps"]
+        .as_array_mut()
+        .expect("dependency list should be an array")
+        .first_mut()
+        .expect("dependency list should not be empty")
+}
+
+fn without_timings(mut report: serde_json::Value) -> serde_json::Value {
+    report.as_object_mut().expect("JSON report should be an object").remove("timings");
+    report
 }
 
 #[test]
@@ -850,20 +935,8 @@ fn explain_unknown_dependency_reports_a_usage_error() {
 fn explain_accepts_metadata_json_and_workspace_root() {
     let fixture = basic_fixture_root();
     let temp = tempfile::tempdir().expect("temporary directory should be created");
-    let metadata_path = temp.path().join("metadata.json");
-    let metadata = Command::new("cargo")
-        .env_remove("RUSTFLAGS")
-        .env("CARGO_TERM_COLOR", "never")
-        .args(["metadata", "--format-version", "1", "--offline", "--manifest-path"])
-        .arg(fixture.join("Cargo.toml"))
-        .output()
-        .expect("cargo metadata should execute");
-    assert!(
-        metadata.status.success(),
-        "cargo metadata failed: {}",
-        String::from_utf8_lossy(&metadata.stderr)
-    );
-    fs::write(&metadata_path, &metadata.stdout).expect("metadata JSON should be writable");
+    let metadata = live_metadata(&fixture, false);
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
 
     let output = depgate()
         .args(["explain", "core", "util", "--metadata-json"])
@@ -877,4 +950,481 @@ fn explain_accepts_metadata_json_and_workspace_root() {
 
     assert_eq!(output.status.code(), Some(0), "metadata-backed explain failed: {output:?}");
     assert_eq!(cleaned_stdout(&output), "core v0.1.0 → util v0.1.0\n");
+}
+
+#[test]
+fn ganja_metadata_check_passes_with_pinned_graph_counters() {
+    let (_temp, metadata) = ganja_metadata_json();
+    let fixture = ganja_fixture_root();
+    let output = depgate()
+        .args(["check", "--metadata-json"])
+        .arg(&metadata)
+        .args(["--workspace-root"])
+        .arg(&fixture)
+        .args(["--config"])
+        .arg(ganja_config_path())
+        .args(["--format", "json", "--offline"])
+        .output()
+        .expect("cargo-depgate should execute the ganja metadata check");
+
+    assert_eq!(output.status.code(), Some(0), "ganja metadata check failed: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ganja report should be valid JSON");
+    let counters = &report["counters"];
+    assert_eq!(counters["packages"].as_u64(), Some(585));
+    assert_eq!(counters["members"].as_u64(), Some(14));
+    assert_eq!(counters["normal_edges"].as_u64(), Some(1_586));
+    assert_eq!(counters["names"].as_u64(), Some(529));
+    assert_eq!(counters["rules"].as_u64(), Some(19));
+    assert_eq!(counters["violations"].as_u64(), Some(0));
+    assert_eq!(counters["unrebased_path_deps"].as_u64(), Some(0));
+}
+
+#[test]
+fn ganja_metadata_check_counters_snapshot() {
+    let (_temp, metadata) = ganja_metadata_json();
+    let fixture = ganja_fixture_root();
+    let output = depgate()
+        .args(["check", "--metadata-json"])
+        .arg(&metadata)
+        .args(["--workspace-root"])
+        .arg(&fixture)
+        .args(["--config"])
+        .arg(ganja_config_path())
+        .args(["--format", "json", "--offline"])
+        .output()
+        .expect("cargo-depgate should execute the ganja metadata snapshot");
+
+    assert_eq!(output.status.code(), Some(0), "ganja metadata snapshot failed: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ganja report should be valid JSON");
+    let report = without_timings(report);
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        let counters = serde_json::to_string_pretty(&report["counters"])
+            .expect("ganja counters should serialize");
+        insta::assert_snapshot!(counters);
+    });
+}
+
+#[test]
+fn ganja_explain_ratatui_is_not_reachable() {
+    let (_temp, metadata) = ganja_metadata_json();
+    let fixture = ganja_fixture_root();
+    let output = depgate()
+        .args(["explain", "ganja-core", "ratatui", "--metadata-json"])
+        .arg(&metadata)
+        .args(["--workspace-root"])
+        .arg(&fixture)
+        .args(["--config"])
+        .arg(ganja_config_path())
+        .arg("--offline")
+        .output()
+        .expect("cargo-depgate should execute the ganja explain");
+
+    assert_eq!(output.status.code(), Some(0), "ganja explain failed: {output:?}");
+    assert_eq!(cleaned_stdout(&output), "not reachable\n");
+}
+
+#[test]
+fn metadata_json_no_deps_is_rejected() {
+    let fixture = basic_fixture_root();
+    let metadata = live_metadata(&fixture, true);
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let output = metadata_check(&metadata_path, &fixture.join("depgate.toml"), None, &[]);
+
+    assert_eq!(output.status.code(), Some(3), "--no-deps metadata must fail closed: {output:?}");
+}
+
+#[test]
+fn nonexistent_manifest_path_maps_to_metadata_failure() {
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let manifest = temp.path().join("missing/Cargo.toml");
+    let output = depgate()
+        .args(["check", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--offline")
+        .output()
+        .expect("cargo-depgate should execute the invalid manifest check");
+
+    assert_eq!(output.status.code(), Some(3), "invalid manifest must map to exit 3: {output:?}");
+    assert!(!output.stderr.is_empty(), "Cargo's diagnostic should be inherited: {output:?}");
+}
+
+#[test]
+fn metadata_json_empty_dep_kinds_is_rejected() {
+    let fixture = basic_fixture_root();
+    let mut metadata = live_metadata(&fixture, false);
+    first_dependency_mut(&mut metadata)["dep_kinds"] = serde_json::json!([]);
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let output = metadata_check(&metadata_path, &fixture.join("depgate.toml"), None, &[]);
+
+    assert_eq!(output.status.code(), Some(3), "empty dep_kinds must fail closed: {output:?}");
+}
+
+#[test]
+fn metadata_json_unknown_dependency_package_is_rejected() {
+    let fixture = basic_fixture_root();
+    let mut metadata = live_metadata(&fixture, false);
+    first_dependency_mut(&mut metadata)["pkg"] =
+        serde_json::Value::String("path+file:///nonexistent#ghost@0.1.0".to_owned());
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let output = metadata_check(&metadata_path, &fixture.join("depgate.toml"), None, &[]);
+
+    assert_eq!(output.status.code(), Some(3), "unknown edge package must fail closed: {output:?}");
+}
+
+#[test]
+fn metadata_json_empty_workspace_members_is_rejected() {
+    let fixture = basic_fixture_root();
+    let mut metadata = live_metadata(&fixture, false);
+    metadata["workspace_members"] = serde_json::json!([]);
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let output = metadata_check(&metadata_path, &fixture.join("depgate.toml"), None, &[]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "empty workspace_members must fail closed: {output:?}"
+    );
+}
+
+#[test]
+fn metadata_json_missing_resolve_node_is_rejected() {
+    let fixture = basic_fixture_root();
+    let mut metadata = live_metadata(&fixture, false);
+    metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .expect("live metadata should contain resolve nodes")
+        .pop()
+        .expect("live metadata should contain multiple resolve nodes");
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let output = metadata_check(&metadata_path, &fixture.join("depgate.toml"), None, &[]);
+
+    assert_eq!(output.status.code(), Some(3), "missing resolve node must fail closed: {output:?}");
+}
+
+#[test]
+fn metadata_json_unknown_extra_resolve_node_is_rejected() {
+    let fixture = basic_fixture_root();
+    let mut metadata = live_metadata(&fixture, false);
+    metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .expect("live metadata should contain resolve nodes")
+        .push(serde_json::json!({
+            "id": "path+file:///nonexistent#ghost@0.1.0",
+            "deps": []
+        }));
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let output = metadata_check(&metadata_path, &fixture.join("depgate.toml"), None, &[]);
+
+    assert_eq!(output.status.code(), Some(3), "extra resolve node must fail closed: {output:?}");
+}
+
+#[test]
+fn metadata_json_duplicate_package_id_is_rejected() {
+    let fixture = basic_fixture_root();
+    let mut metadata = live_metadata(&fixture, false);
+    let packages =
+        metadata["packages"].as_array_mut().expect("live metadata should contain packages");
+    let duplicate = packages.first().expect("live metadata should contain a package").clone();
+    packages.push(duplicate);
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let output = metadata_check(&metadata_path, &fixture.join("depgate.toml"), None, &[]);
+
+    assert_eq!(output.status.code(), Some(3), "duplicate package id must fail closed: {output:?}");
+}
+
+#[test]
+fn metadata_json_member_outside_workspace_root_is_rejected() {
+    let fixture = basic_fixture_root();
+    let mut metadata = live_metadata(&fixture, false);
+    let member_id = metadata["workspace_members"]
+        .as_array()
+        .expect("live metadata should contain workspace members")
+        .first()
+        .and_then(|member| member.as_str())
+        .expect("workspace member id should be a string")
+        .to_owned();
+    let package = metadata["packages"]
+        .as_array_mut()
+        .expect("live metadata should contain packages")
+        .iter_mut()
+        .find(|package| package["id"].as_str() == Some(member_id.as_str()))
+        .expect("workspace member should have a package entry");
+    package["manifest_path"] =
+        serde_json::Value::String("/nonexistent/outside/Cargo.toml".to_owned());
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let output = metadata_check(&metadata_path, &fixture.join("depgate.toml"), Some(&fixture), &[]);
+
+    assert_eq!(output.status.code(), Some(3), "outside member must fail closed: {output:?}");
+}
+
+#[test]
+fn cargo_metadata_timeout_exits_three_within_bound() {
+    let fixture = basic_fixture_root();
+    let started = Instant::now();
+    let output = depgate()
+        .args(["check", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .arg("--config")
+        .arg(fixture.join("depgate.toml"))
+        .args(["--offline", "--cargo-timeout", "1"])
+        .env("CARGO", repository_root().join("tests/bin/slow-cargo"))
+        .output()
+        .expect("cargo-depgate should execute the timeout check");
+    let elapsed = started.elapsed();
+
+    assert_eq!(output.status.code(), Some(3), "timed-out metadata must exit 3: {output:?}");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "metadata timeout exceeded the two-second bound: {elapsed:?}"
+    );
+    assert!(
+        cleaned_stderr(&output).contains("cargo metadata exceeded --cargo-timeout=1s"),
+        "timeout diagnostic missing: {output:?}"
+    );
+}
+
+#[test]
+fn metadata_json_file_and_stdin_reports_are_equivalent() {
+    let fixture = basic_fixture_root();
+    let config = fixture.join("depgate.toml");
+    let metadata = live_metadata(&fixture, false);
+    let metadata_bytes = serde_json::to_vec(&metadata).expect("metadata JSON should serialize");
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = write_metadata_json(temp.path(), &metadata);
+    let options = ["--format", "json"];
+    let from_file = metadata_check(&metadata_path, &config, Some(&fixture), &options);
+
+    let from_stdin = depgate()
+        .args(["check", "--metadata-json", "-"])
+        .args(["--workspace-root"])
+        .arg(&fixture)
+        .arg("--config")
+        .arg(&config)
+        .args(options)
+        .write_stdin(metadata_bytes)
+        .output()
+        .expect("cargo-depgate should execute the stdin metadata check");
+
+    assert_eq!(from_file.status.code(), Some(0), "file metadata check failed: {from_file:?}");
+    assert_eq!(from_stdin.status.code(), Some(0), "stdin metadata check failed: {from_stdin:?}");
+    let file_report: serde_json::Value =
+        serde_json::from_slice(&from_file.stdout).expect("file report should be valid JSON");
+    let stdin_report: serde_json::Value =
+        serde_json::from_slice(&from_stdin.stdout).expect("stdin report should be valid JSON");
+    assert_eq!(without_timings(file_report), without_timings(stdin_report));
+}
+
+#[test]
+fn workspace_root_without_metadata_json_is_a_usage_error() {
+    let fixture = basic_fixture_root();
+    let output = depgate()
+        .args(["check", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .arg("--config")
+        .arg(fixture.join("depgate.toml"))
+        .args(["--workspace-root"])
+        .arg(&fixture)
+        .output()
+        .expect("cargo-depgate should execute the usage check");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "workspace root without JSON must be rejected: {output:?}"
+    );
+}
+
+#[test]
+fn renamed_dependency_matches_real_package_name_only() {
+    let fixture = repository_root().join("tests/fixtures/ws-rename");
+    let output = fixture_check(&fixture);
+
+    assert_eq!(output.status.code(), Some(0), "renamed dependency check failed: {output:?}");
+    assert!(cleaned_stdout(&output).contains("0 violations"), "unexpected report: {output:?}");
+}
+
+#[test]
+fn renamed_dependency_deny_uses_real_package_name() {
+    let fixture = repository_root().join("tests/fixtures/ws-rename");
+    let output = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &fixture.join("depgate-deny-real-name.toml"),
+        &[],
+        false,
+    );
+
+    assert_eq!(output.status.code(), Some(1), "real-name deny must violate: {output:?}");
+    let stdout = cleaned_stdout(&output);
+    assert!(stdout.contains("rules.app.deny"), "deny rule id missing: {stdout}");
+    assert!(stdout.contains("core"), "real package name missing from report: {stdout}");
+}
+
+#[test]
+fn multi_version_dependency_witnesses_keep_reachable_versions_distinct() {
+    let fixture = repository_root().join("tests/fixtures/ws-multiver");
+    let output = fixture_check_with_options(&fixture, &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(1), "multi-version deny must violate: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("multi-version report should be JSON");
+    assert_eq!(report["counters"]["violations"].as_u64(), Some(2));
+    let violations = report["violations"].as_array().expect("report should contain violations");
+    let app1 = violations
+        .iter()
+        .find(|violation| violation["rule_id"] == "rules.app1.deny")
+        .expect("app1 deny violation should be present");
+    let app2 = violations
+        .iter()
+        .find(|violation| violation["rule_id"] == "rules.app2.deny")
+        .expect("app2 deny violation should be present");
+    assert_eq!(app1["matches"][0]["name"], "foo");
+    assert_eq!(app1["matches"][0]["version"], "1.0.0");
+    assert_eq!(app2["matches"][0]["name"], "foo");
+    assert_eq!(app2["matches"][0]["version"], "2.0.0");
+}
+
+#[test]
+fn dev_dependency_cycle_is_excluded_from_normal_closure() {
+    let fixture = repository_root().join("tests/fixtures/ws-devcycle");
+    let output = fixture_check(&fixture);
+
+    assert_eq!(output.status.code(), Some(0), "dev-dependency cycle check failed: {output:?}");
+    assert!(cleaned_stdout(&output).contains("0 violations"), "unexpected report: {output:?}");
+}
+
+#[test]
+fn cfg_only_dependency_is_reported_with_target_annotation() {
+    let fixture = repository_root().join("tests/fixtures/ws-cfg");
+    let output = fixture_check_with_options(&fixture, &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(1), "cfg-only deny must violate: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("cfg report should be JSON");
+    assert_eq!(report["counters"]["superset_extra_edges"].as_u64(), Some(1));
+    let violation = report["violations"]
+        .as_array()
+        .expect("report should contain violations")
+        .iter()
+        .find(|violation| violation["rule_id"] == "rules.app.deny")
+        .expect("app deny violation should be present");
+    assert_eq!(violation["package"], "app");
+    assert_eq!(violation["matches"][0]["name"], "winonly");
+    assert_eq!(violation["matches"][0]["version"], "0.1.0");
+    assert_eq!(violation["matches"][0]["witness"][0]["name"], "winonly");
+    assert_eq!(violation["matches"][0]["witness"][0]["version"], "0.1.0");
+    assert_eq!(violation["matches"][0]["witness"][0]["target"], "cfg(windows)");
+}
+
+#[test]
+fn optional_dependency_is_absent_with_default_features() {
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let output = fixture_check(&fixture);
+
+    assert_eq!(output.status.code(), Some(0), "default feature check failed: {output:?}");
+    assert!(cleaned_stdout(&output).contains("0 violations"), "unexpected report: {output:?}");
+}
+
+#[test]
+fn optional_dependency_is_forwarded_by_cli_feature_flag() {
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let output = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &fixture.join("depgate.toml"),
+        &["--features", "app/net", "--format", "json"],
+        false,
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "enabled optional dependency must violate: {output:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("optional-feature report should be JSON");
+    let violation = report["violations"]
+        .as_array()
+        .expect("report should contain violations")
+        .iter()
+        .find(|violation| violation["rule_id"] == "rules.app.deny")
+        .expect("app deny violation should be present");
+    assert_eq!(violation["package"], "app");
+    assert_eq!(violation["matches"][0]["name"], "reqwest-like");
+}
+
+#[test]
+fn direct_rule_on_an_optional_declaration_warns_and_counts() {
+    // AC 5 end to end: `app` declares `reqwest-like` as an optional normal dependency, so a
+    // `direct` rule on it emits the §1.3 warning and bumps `direct_optional_decls`, even though
+    // the rule itself passes once the feature that pulls the dependency in is enabled.
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let config_dir = tempfile::tempdir().expect("temporary direct-rule config should be creatable");
+    let config = config_dir.path().join("depgate.toml");
+    fs::write(
+        &config,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.app]\ndirect = [\"reqwest-like\"]\n",
+    )
+    .expect("direct-rule config should be writable");
+
+    let output = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &config,
+        &["--features", "app/net", "--format", "json"],
+        false,
+    );
+
+    assert_eq!(output.status.code(), Some(0), "direct rule should pass: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("direct-rule report should be JSON");
+    assert_eq!(report["counters"]["direct_optional_decls"].as_u64(), Some(1));
+    assert_eq!(
+        cleaned_stderr(&output).trim(),
+        "warning: rules.app.direct: app declares optional dependency reqwest-like; \
+         sibling feature unification may add it to the resolved edge set"
+    );
+}
+
+#[test]
+fn optional_dependency_is_forwarded_by_config_graph_feature_selection() {
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let copied = tempfile::tempdir().expect("temporary feature workspace should be creatable");
+    copy_tree(&fixture, copied.path());
+    let config = copied.path().join("depgate.toml");
+    let text = fs::read_to_string(&config).expect("feature fixture config should be readable");
+    fs::write(
+        &config,
+        format!(
+            "schema = 1\n\n[graph]\nfeatures = \"all\"\n\n{}",
+            text.lines().skip(1).collect::<Vec<_>>().join("\n")
+        ),
+    )
+    .expect("feature selection config should be writable");
+
+    let output = check_with_manifest_and_config(
+        Some(&copied.path().join("Cargo.toml")),
+        &config,
+        &["--format", "json"],
+        false,
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "config-selected optional dependency must violate: {output:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("config-feature report should be JSON");
+    assert_eq!(report["features"], "all");
+    assert_eq!(report["violations"][0]["matches"][0]["name"], "reqwest-like");
 }

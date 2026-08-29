@@ -1,0 +1,16 @@
+---
+source: tests/cli_tests.rs
+expression: counters
+---
+{
+  "direct_optional_decls": 0,
+  "matches": 0,
+  "members": 14,
+  "names": 529,
+  "normal_edges": 1586,
+  "packages": 585,
+  "rules": 19,
+  "superset_extra_edges": 202,
+  "unrebased_path_deps": 0,
+  "violations": 0
+}

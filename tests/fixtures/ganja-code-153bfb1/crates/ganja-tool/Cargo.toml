@@ -1,0 +1,102 @@
+[package]
+name = "ganja-tool"
+description = "What the model can do besides talk: ganja's builtin tools and the read log behind them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+[dependencies]
+# Only where dyn-safety demands it: `Tool` lives behind `Arc<dyn _>`.
+async-trait.workspace = true
+# Where truncated output spills to, resolved the same way every other store in
+# this workspace resolves its directory.
+etcetera.workspace = true
+futures.workspace = true
+# Which calls are gated, and the project root a write is checked for
+# containment against. The engine is not in this list and must never be: a tool
+# answers to the rules, not to the loop that called it.
+ganja-permission.workspace = true
+# `glob` and `grep` walk the filesystem in-process rather than shelling to
+# `rg`, sharing the same crates ripgrep itself is built on for byte-identical
+# glob and ignore-file semantics. `grep-matcher` is `bash_output`'s: the
+# `Matcher` trait `RegexMatcher` implements, applied to an in-memory chunk of
+# a background job's output rather than a walked file.
+grep-matcher.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
+# The web-search prompt's current UTC year is a per-crate call site because
+# this tool layer cannot borrow the engine's prompt formatter above it.
+jiff.workspace = true
+# `webfetch`'s markdown format is a real conversion of the page's markup, the
+# way upstream's turndown call is, rather than the tag-stripped text that stood
+# in for one until the crate landed.
+htmd.workspace = true
+# `webfetch`'s text format walks the parse tree htmd hands back rather than
+# htmd's rendering of it: that rendering markdown-escapes every text node and
+# offers no way not to, which in a plain-text answer is a backslash the page
+# never had. Reaching the tree needs `NodeData`, which htmd re-exports no more
+# of than `Node`. Not a new vendor — htmd already resolves this exact version.
+markup5ever_rcdom.workspace = true
+# The stale-read watcher subscribes to the platform's own filesystem
+# notifications — FSEvents, inotify, ReadDirectoryChangesW — instead of polling
+# the files a session has read, which on a large checkout would be a stat storm
+# for an answer that is almost always "nothing moved".
+notify.workspace = true
+# `tool_search` ranks a keyword query over the deferred tools' names and
+# descriptions with the same matcher the palette and the `@` menu already
+# use, instead of hand-rolling a third scorer.
+nucleo-matcher.workspace = true
+# `websearch` puts a key in Exa's query string, and the escape set is RFC
+# 3986's unreserved complement rather than anything this crate should be
+# spelling itself: the hand encoder it replaces was one drift away from the
+# mojibake its decoding twin already had.
+percent-encoding.workspace = true
+# `webfetch` is the one tool that reaches the network; the workspace
+# declaration pins rustls so no build here reaches for OpenSSL.
+reqwest.workspace = true
+# Tool argument schemas, generated from the argument structs themselves so the
+# schema a model sees cannot drift from what the tool parses.
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `edit` reports what it changed as a unified patch, which a frontend renders
+# instead of the two whole files.
+similar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# `CancellationToken` lives behind `rt`; the workspace declaration carries no
+# features so crates opt into exactly the modules they use.
+tokio-util = { workspace = true, features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+# The shell tool runs commands in their own process group and `killpg` is the
+# call that ends one; the socket identity and test-only timestamp probes use
+# the same platform vocabulary.
+libc.workspace = true
+# Anchored file I/O needs descriptor-relative opens whose flags reach the
+# syscall unchanged, while the safe API owns every returned descriptor before
+# this crate translates an error.
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Spilled tool output sealed on its create handle and the spill directory
+# born private — the windows twin of the 0o600/0o700 the unix modes above
+# enforce, in the vocabulary this platform speaks.
+windows-sys.workspace = true
+
+[dev-dependencies]
+# Every tool that touches the disk is tested against a real directory tree that
+# goes away afterwards, rather than against a mocked filesystem.
+tempfile.workspace = true
+# `net` is for `webfetch` only: its tests serve canned HTTP over a loopback
+# socket rather than mocking the client, so the request really is built, sent
+# and streamed. The library itself needs no listener.
+tokio = { workspace = true, features = ["net"] }

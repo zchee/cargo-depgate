@@ -286,7 +286,7 @@ fn run_explain(explain: &ExplainArgs) -> Result<(), Error> {
         package: explain.package.clone(),
         dependency: explain.dependency.clone(),
     };
-    let outcome = pipeline::explain(&args)?;
+    let outcome = pipeline::explain(&args, &mut stderr)?;
     let format = resolve_format(explain.common.format);
     let mut stdout = anstream::stdout();
 

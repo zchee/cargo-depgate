@@ -1,0 +1,10 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest-like = { path = "../reqwest-like", optional = true }
+
+[features]
+net = ["dep:reqwest-like"]

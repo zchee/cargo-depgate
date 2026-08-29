@@ -1,0 +1,7 @@
+schema = 1
+
+[manifest]
+versions-in-root = false
+
+[rules.app]
+deny = ["reqwest-like"]

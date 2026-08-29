@@ -1,0 +1,128 @@
+[package]
+name = "ganja-cli"
+description = "The `ganja` command-line binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+[[bin]]
+name = "ganja"
+path = "src/main.rs"
+
+# `publish = false` above also hides the binary from `dist`, which reads it as
+# "nothing to distribute"; this says the local distribution archive still
+# carries `ganja` even though crates.io never will.
+[package.metadata.dist]
+dist = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+# The log directory is resolved here rather than asked of `ganja-core`, which
+# exposes its own paths but not the data home they hang under. `auth.rs` and
+# `project.rs` already each resolve it this way; this is the third.
+etcetera.workspace = true
+# `run` consumes the engine's event stream, which arrives as a `BoxStream`.
+# Naming the crate is the only way to reach the `Stream` trait behind it.
+futures.workspace = true
+# `run --attach` drives a server somebody else is running, and this is the
+# typed consumer of its routes — the same four surfaces the engine call below
+# reaches in-process.
+ganja-client.workspace = true
+ganja-core.workspace = true
+# `sessions` prints a stored session's cost and the importer decides where a
+# project's config lives, so the binary names a worktree and a usage total
+# without needing the engine's re-export to hand them over.
+ganja-permission.workspace = true
+ganja-protocol.workspace = true
+# `auth login` drives the OAuth flows directly — device codes, loopback
+# callbacks, the credential each hands back — so it names them where they live
+# rather than through the engine's re-export, which is a convenience for code
+# that has an engine and this code does not.
+ganja-provider.workspace = true
+# The `serve` subcommand: the engine this binary assembles, behind the HTTP
+# routes and the SSE stream that crate owns.
+ganja-serve.workspace = true
+ganja-tui.workspace = true
+# The daily log rolls on the machine's own civil date. Jiff supplies the
+# system-timezone lookup without the unsafe unix-only `localtime_r` path.
+jiff.workspace = true
+# Two commands here read a file written in the dialect ganja's own config has
+# left: `import-opencode` reads upstream's, and `migrate` translates a legacy
+# ganja one. Both need the keys in document order — permission rules are
+# evaluated last-match-wins, so a reader that sorted them would change which
+# rule decides — and the AST is what preserves it. `serde` is the other half:
+# it decodes such a file into `ganja_core::config::Config`, which is what makes
+# "the same config, both spellings" a comparison rather than a claim. Writing
+# is `toml_edit`'s now, on both paths.
+jsonc-parser = { workspace = true, features = ["serde"] }
+# Only for the raw-mode read that keeps a typed API key off the screen, through
+# the same crossterm instance the UI drives so the two cannot disagree about
+# terminal state.
+ratatui.workspace = true
+# `import-claude-hooks` refuses a hook group before writing it when its matcher
+# would not compile — the one `check_hooks` refusal a mirror cannot spell
+# without the same regex engine the loader itself judges matchers with. Already
+# in this binary's tree through `ganja-core`, so this opt-in compiles nothing
+# new.
+regex.workspace = true
+# A typed or piped key is wrapped the moment it is whole, and the buffer it was
+# assembled in is wiped rather than left in the heap.
+secrecy.workspace = true
+# `run --format json` writes one object per event, and the parts it carries are
+# serde-derived: composing that by hand would be a JSON escaper nobody reviewed.
+# The pty and importer tests read documents with it too, which is why it sits
+# here rather than under the dev tier it used to.
+serde_json.workspace = true
+# `mcp add/remove` stages the edited config beside the file and renames it into
+# place, and the staged file has to vanish however the write ends — the crate
+# that ties a temporary file's life to a value's is what makes the failure path
+# leave no litter, which a hand-named `.tmp` could only approximate. The test
+# tier already carried this; production reaches for it now.
+tempfile.workspace = true
+tokio.workspace = true
+# A login flow's wait is ended by a `CancellationToken`, and the binary is the
+# only crate that can catch the keystroke which fires one. The token lives
+# behind `rt`, which is why the workspace declaration carries no features.
+tokio-util = { workspace = true, features = ["rt"] }
+# The format-preserving editor for `ganja.toml`, which every command that
+# writes one goes through: `mcp add`/`remove`, `config import-opencode`,
+# `config migrate` and `config import-claude-hooks`. The two that edit an
+# existing file need the document — comments, key order and spacing and all —
+# rather than a value type, which would print a correct config back with
+# every comment its owner wrote deleted; the two that create one need the
+# same library for ordered, correctly escaped rendering. See the workspace
+# declaration for the rest of the reason.
+toml_edit.workspace = true
+# Rolling files, so a long-lived session cannot grow one without bound, and a
+# worker thread, so a trace never blocks the render loop on a disk write.
+tracing-appender.workspace = true
+# `env-filter` is what makes `RUST_LOG` mean anything here.
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# `tests/teammate_pane.rs` alone: the pane argv this binary is the child of is
+# that crate's contract, so the test reads its constants rather than restating
+# them. Dev-only — the shipped binary reaches the pane backends through
+# `ganja-tui`, which assembles them.
+ganja-teammate-local.workspace = true
+assert_cmd.workspace = true
+# The private tmux server, the project/data-home fixture and the team-file
+# seeder the pane and drill suites share with `ganja-core`'s.
+ganja-testkit.workspace = true
+predicates.workspace = true
+# The one quoter production launch lines ride, for the window command the
+# pane suite composes.
+shlex.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+expectrl.workspace = true
+# The unix-only staging-write failure test uses `setrlimit` to force a real
+# short write; production no longer reaches libc for the local date.
+libc.workspace = true

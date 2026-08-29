@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/app1", "crates/app2"]
+exclude = ["vendor/foo-v1", "vendor/foo-v2"]
+resolver = "3"

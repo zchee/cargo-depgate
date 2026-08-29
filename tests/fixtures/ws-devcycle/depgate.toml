@@ -1,0 +1,10 @@
+schema = 1
+
+[manifest]
+versions-in-root = false
+
+[rules.a]
+leaf = true
+
+[rules.b]
+internal = ["a"]

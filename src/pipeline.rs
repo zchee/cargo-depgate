@@ -112,18 +112,14 @@ pub struct Outcome {
 pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error> {
     let mut timings = Timings::start();
 
-    let preloaded = if let Some(path) = &args.config_path {
-        let raw = config::load(path)?;
-        config::validate(&raw, None).map_err(configuration_error)?;
-        Some(raw)
-    } else {
-        None
-    };
+    let (preloaded, metadata_options) =
+        preload_config(args.config_path.as_deref(), &args.metadata)?;
 
-    let buffer = timings.measure(Phase::Read, || metadata::acquire(&args.metadata))?;
+    let buffer = timings.measure(Phase::Read, || metadata::acquire(&metadata_options))?;
     let meta = timings.measure(Phase::Parse, || metadata::parse(&buffer))?;
     let graph = timings.measure(Phase::Graph, || Graph::build(&meta))?;
 
+    let explicit = preloaded.is_some();
     let raw = if let Some(raw) = preloaded {
         raw
     } else {
@@ -131,8 +127,10 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
         config::load(&path)?
     };
     let validated = config::validate(&raw, Some(&graph)).map_err(configuration_error)?;
+    let feature_warning =
+        feature_selection_after_metadata(explicit, &args.metadata, &validated.config.features)?;
 
-    for warning in &validated.warnings {
+    for warning in feature_warning.iter().chain(&validated.warnings) {
         drop(writeln!(stderr, "{warning}"));
     }
 
@@ -196,19 +194,15 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
 ///
 /// Propagates configuration, metadata, and graph errors. Unknown package or dependency names are
 /// reported as [`Error::Configuration`] and therefore map to exit code 2.
-pub fn explain(args: &ExplainArgs) -> Result<ExplainOutcome, Error> {
-    let preloaded = if let Some(path) = &args.config_path {
-        let raw = config::load(path)?;
-        config::validate(&raw, None).map_err(configuration_error)?;
-        Some(raw)
-    } else {
-        None
-    };
+pub fn explain(args: &ExplainArgs, stderr: &mut impl Write) -> Result<ExplainOutcome, Error> {
+    let (preloaded, metadata_options) =
+        preload_config(args.config_path.as_deref(), &args.metadata)?;
 
-    let buffer = metadata::acquire(&args.metadata)?;
+    let buffer = metadata::acquire(&metadata_options)?;
     let meta = metadata::parse(&buffer)?;
     let graph = Graph::build(&meta)?;
 
+    let explicit = preloaded.is_some();
     let raw = if let Some(raw) = preloaded {
         raw
     } else {
@@ -217,7 +211,14 @@ pub fn explain(args: &ExplainArgs) -> Result<ExplainOutcome, Error> {
     };
     // Validation is deliberately retained even though explain does not evaluate rules: it is the
     // same Phase-B gate as check and materialises the config's graph feature selection.
-    let _validated = config::validate(&raw, Some(&graph)).map_err(configuration_error)?;
+    let validated = config::validate(&raw, Some(&graph)).map_err(configuration_error)?;
+    // Same diagnostics as `check` for identical flags: the discovered-config feature rule is an
+    // error (exit 2) and the `--metadata-json` warning is written to the caller's stderr.
+    if let Some(warning) =
+        feature_selection_after_metadata(explicit, &args.metadata, &validated.config.features)?
+    {
+        drop(writeln!(stderr, "{warning}"));
+    }
 
     let package_name = graph.lookup_name(&args.package).ok_or_else(|| Error::Configuration {
         message: config::unknown_package_message("explain", &args.package),
@@ -273,6 +274,81 @@ fn manifest_status(report: &ManifestReport) -> RuleStatus {
         passed: report.passed(),
         matched: count(report.entries.len()),
     }
+}
+
+/// Loads and Phase-A-validates an explicit `--config` file before cargo is spawned and derives
+/// the spawn options from it: `[graph].features` reaches the `cargo metadata` command **only**
+/// through this pre-spawn path (§1.3). Without `--config` nothing is loaded here — the discovered
+/// file is found at `workspace_root`, which exists only after metadata (no walk-up from cwd, no
+/// second cargo spawn).
+fn preload_config(
+    config_path: Option<&Path>,
+    metadata: &metadata::MetadataOptions,
+) -> Result<(Option<config::RawConfig>, metadata::MetadataOptions), Error> {
+    let Some(path) = config_path else {
+        return Ok((None, metadata.clone()));
+    };
+    let raw = config::load(path)?;
+    let validated = config::validate(&raw, None).map_err(configuration_error)?;
+    let options = spawn_options(metadata, &validated.config.features);
+    Ok((Some(raw), options))
+}
+
+/// Applies a config's `[graph].features` to the metadata command unless the CLI already selected
+/// features (CLI flags override, §1.3) or no cargo runs (`--metadata-json`).
+pub(crate) fn spawn_options(
+    base: &metadata::MetadataOptions,
+    features: &config::FeatureSelection,
+) -> metadata::MetadataOptions {
+    let mut options = base.clone();
+    if options.source.is_some() || cli_selected_features(base) {
+        return options;
+    }
+    match features {
+        config::FeatureSelection::Default => {}
+        config::FeatureSelection::All => options.all_features = true,
+        config::FeatureSelection::List(list) => options.features.clone_from(list),
+    }
+    options
+}
+
+/// Whether the CLI made a feature *selection* that supersedes `[graph].features`.
+///
+/// A bare `--no-default-features` does not: cargo combines it with `--features …` rather than
+/// replacing the selection, so it passes through to the spawn and the config's list still applies.
+fn cli_selected_features(options: &metadata::MetadataOptions) -> bool {
+    !options.features.is_empty() || options.all_features
+}
+
+/// The fate of a non-default `[graph].features` once metadata already exists: under
+/// `--metadata-json` it is ignored with a warning (the JSON was produced with its own features);
+/// in a *discovered* `depgate.toml` it cannot have reached the spawn, so it is an error (exit 2)
+/// rather than a silently different graph — pass `--config` or the CLI feature flags (D12).
+pub(crate) fn feature_selection_after_metadata(
+    explicit_config: bool,
+    metadata: &metadata::MetadataOptions,
+    features: &config::FeatureSelection,
+) -> Result<Option<String>, Error> {
+    if matches!(features, config::FeatureSelection::Default) || cli_selected_features(metadata) {
+        return Ok(None);
+    }
+    if metadata.source.is_some() {
+        return Ok(Some(
+            "warning: [graph].features is ignored under --metadata-json; the JSON was produced \
+             with its own feature selection"
+                .to_owned(),
+        ));
+    }
+    if explicit_config {
+        return Ok(None);
+    }
+    Err(Error::Configuration {
+        message: "[graph].features in a discovered depgate.toml cannot select features for this \
+                  run: the file is found only after `cargo metadata`; pass --config <path> or \
+                  --features/--all-features"
+            .to_owned(),
+        span: None,
+    })
 }
 
 fn configuration_error(error: config::ConfigError) -> Error {

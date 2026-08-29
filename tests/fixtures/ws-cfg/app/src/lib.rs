@@ -1,0 +1,1 @@
+//! Configuration-target fixture app.

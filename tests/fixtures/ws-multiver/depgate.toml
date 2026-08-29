@@ -1,0 +1,10 @@
+schema = 1
+
+[manifest]
+versions-in-root = false
+
+[rules.app1]
+deny = ["foo"]
+
+[rules.app2]
+deny = ["foo"]

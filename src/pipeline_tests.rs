@@ -99,6 +99,16 @@ fn explain_config(root: &Path) -> PathBuf {
     path
 }
 
+fn explain_for_test(args: &ExplainArgs) -> Result<ExplainOutcome, Error> {
+    explain(args, &mut Vec::new())
+}
+
+fn run_explain(args: &ExplainArgs) -> (Result<ExplainOutcome, Error>, String) {
+    let mut stderr = Vec::new();
+    let result = explain(args, &mut stderr);
+    (result, String::from_utf8(stderr).expect("diagnostics should be UTF-8"))
+}
+
 fn run_check(args: &CheckArgs) -> (Result<Outcome, Error>, String) {
     let mut stderr = Vec::new();
     let result = check(args, &mut stderr);
@@ -372,7 +382,7 @@ fn failing_deny_rule_returns_policy_outcome() {
 fn explain_unknown_package_returns_configuration_error() {
     let temp = tempdir().expect("temporary pipeline directory should be creatable");
     let config_path = explain_config(temp.path());
-    let result = explain(&explain_args(temp.path(), config_path, "missing", "dep"));
+    let result = explain_for_test(&explain_args(temp.path(), config_path, "missing", "dep"));
 
     let error = result.expect_err("an unknown explain root must fail");
     assert!(matches!(
@@ -387,7 +397,7 @@ fn explain_unknown_package_returns_configuration_error() {
 fn explain_unknown_dependency_returns_configuration_error() {
     let temp = tempdir().expect("temporary pipeline directory should be creatable");
     let config_path = explain_config(temp.path());
-    let result = explain(&explain_args(temp.path(), config_path, "app", "missing"));
+    let result = explain_for_test(&explain_args(temp.path(), config_path, "app", "missing"));
 
     let error = result.expect_err("an unknown explain dependency must fail");
     assert!(matches!(
@@ -402,7 +412,7 @@ fn explain_unknown_dependency_returns_configuration_error() {
 fn explain_returns_a_root_to_dependency_witness_when_reachable() {
     let temp = tempdir().expect("temporary pipeline directory should be creatable");
     let config_path = explain_config(temp.path());
-    let outcome = explain(&explain_args(temp.path(), config_path, "app", "dep"))
+    let outcome = explain_for_test(&explain_args(temp.path(), config_path, "app", "dep"))
         .expect("the dependency should be reachable");
 
     assert!(outcome.reachable);
@@ -416,9 +426,107 @@ fn explain_returns_a_root_to_dependency_witness_when_reachable() {
 fn explain_returns_an_empty_path_when_dependency_is_not_reachable() {
     let temp = tempdir().expect("temporary pipeline directory should be creatable");
     let config_path = explain_config(temp.path());
-    let outcome = explain(&explain_args(temp.path(), config_path, "dep", "app"))
+    let outcome = explain_for_test(&explain_args(temp.path(), config_path, "dep", "app"))
         .expect("an unreachable dependency is a successful query");
 
     assert!(!outcome.reachable);
     assert!(outcome.path.is_empty());
+}
+
+fn spawn_base() -> metadata::MetadataOptions {
+    metadata::MetadataOptions::default()
+}
+
+#[test]
+fn explicit_config_features_reach_the_spawn_unless_the_cli_selected_some() {
+    let all = spawn_options(&spawn_base(), &config::FeatureSelection::All);
+    assert!(all.all_features);
+
+    let list =
+        spawn_options(&spawn_base(), &config::FeatureSelection::List(vec!["app/net".to_owned()]));
+    assert_eq!(list.features, ["app/net"]);
+
+    let mut cli = spawn_base();
+    cli.features.push("app/other".to_owned());
+    let kept = spawn_options(&cli, &config::FeatureSelection::All);
+    assert!(!kept.all_features, "CLI feature flags override the config");
+    assert_eq!(kept.features, ["app/other"]);
+
+    let mut json = spawn_base();
+    json.source = Some(crate::cli::MetadataSource::Stdin);
+    let untouched = spawn_options(&json, &config::FeatureSelection::All);
+    assert!(!untouched.all_features, "nothing is spawned under --metadata-json");
+}
+
+#[test]
+fn discovered_non_default_features_are_an_error_and_json_input_only_warns() {
+    let all = config::FeatureSelection::All;
+    assert!(feature_selection_after_metadata(true, &spawn_base(), &all).is_ok_and(|w| w.is_none()));
+    assert!(
+        feature_selection_after_metadata(false, &spawn_base(), &config::FeatureSelection::Default)
+            .is_ok_and(|w| w.is_none())
+    );
+
+    let error = feature_selection_after_metadata(false, &spawn_base(), &all)
+        .expect_err("a discovered config cannot select features after the spawn");
+    assert_eq!(error.exit_code(), 2);
+    assert!(error.to_string().contains("--config"), "{error}");
+
+    let mut json = spawn_base();
+    json.source = Some(crate::cli::MetadataSource::Stdin);
+    let warning = feature_selection_after_metadata(false, &json, &all).expect("warning only");
+    assert!(warning.is_some_and(|w| w.contains("--metadata-json")));
+
+    let mut cli = spawn_base();
+    cli.all_features = true;
+    assert!(feature_selection_after_metadata(false, &cli, &all).is_ok_and(|w| w.is_none()));
+}
+
+#[test]
+fn bare_no_default_features_is_not_a_cli_feature_selection() {
+    // Cargo combines `--no-default-features` with `--features …` rather than replacing the
+    // selection, so on its own it must not discard the config's list.
+    let mut no_default = spawn_base();
+    no_default.no_default_features = true;
+    let list = config::FeatureSelection::List(vec!["app/net".to_owned()]);
+
+    let combined = spawn_options(&no_default, &list);
+    assert!(combined.no_default_features, "the CLI flag still reaches the spawn");
+    assert_eq!(combined.features, ["app/net"], "the config's list still applies");
+
+    let all = spawn_options(&no_default, &config::FeatureSelection::All);
+    assert!(all.all_features);
+    assert!(all.no_default_features);
+
+    // With no CLI selection, a discovered non-default selection stays a hard error (D12).
+    let error =
+        feature_selection_after_metadata(false, &no_default, &config::FeatureSelection::All)
+            .expect_err("a discovered config still cannot select features after the spawn");
+    assert_eq!(error.exit_code(), 2);
+
+    // `--features` and `--all-features` remain selections that win over the config.
+    let mut features = spawn_base();
+    features.no_default_features = true;
+    features.features.push("app/other".to_owned());
+    let kept = spawn_options(&features, &config::FeatureSelection::All);
+    assert!(!kept.all_features, "an explicit --features list overrides the config");
+    assert_eq!(kept.features, ["app/other"]);
+}
+
+#[test]
+fn explain_warns_that_metadata_json_ignores_config_features() {
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let path = temp.path().join("depgate.toml");
+    write(
+        &path,
+        "schema = 1\n\n[graph]\nfeatures = \"all\"\n\n[manifest]\nversions-in-root = false\n\n\
+         [rules.app]\ndirect = [\"dep\"]\n",
+    );
+    let (outcome, stderr) = run_explain(&explain_args(temp.path(), path, "app", "dep"));
+
+    assert!(outcome.is_ok_and(|outcome| outcome.reachable));
+    assert!(
+        stderr.contains("[graph].features is ignored under --metadata-json"),
+        "explain must emit check's feature warning: {stderr:?}"
+    );
 }

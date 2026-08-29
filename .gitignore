@@ -19,3 +19,6 @@ target
 
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
+
+# hermetic cargo-metadata fixtures (the global excludes file ignores *.gz)
+!tests/fixtures/**/*.gz
