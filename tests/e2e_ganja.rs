@@ -533,15 +533,9 @@ fn live_explain() {
 fn migration_diff_applicability() {
     let ws = workspace();
     let diff = repository_root().join("docs/migration/ganja-code.diff");
-    // P6 turns this early return into a hard failure: once the diff is committed, a renamed or
-    // mistyped path must fail the test rather than skip it.
-    if !diff.exists() {
-        eprintln!(
-            "migration diff applicability check deferred: {} does not exist yet",
-            diff.display()
-        );
-        return;
-    }
+    // The diff is committed, so a renamed or mistyped path is a failure, never a skip: the whole
+    // point of this test is that the published migration still applies to a real checkout.
+    assert!(diff.exists(), "the migration diff is missing: {}", diff.display());
     let output = Command::new("git")
         .args(["-C"])
         .arg(&ws)
