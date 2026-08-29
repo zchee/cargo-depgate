@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{ArgAction, Parser, Subcommand, builder::TypedValueParser as _};
+use clap::{Parser, Subcommand, builder::TypedValueParser as _};
 use clap_cargo::{Features, Manifest, style::CLAP_STYLING};
 use schemars::schema_for;
 
@@ -146,10 +146,6 @@ pub(crate) struct CommonArgs {
     /// Report command timings.
     #[arg(long)]
     timings: bool,
-
-    /// Increase diagnostic verbosity; repeat for more detail.
-    #[arg(short = 'v', action = ArgAction::Count)]
-    verbose: u8,
 }
 
 impl CommonArgs {
@@ -242,7 +238,7 @@ pub fn run(args: &Args) -> Result<(), Error> {
 
 fn run_check(common: &CommonArgs) -> Result<(), Error> {
     let mut stderr = io::stderr();
-    warn_if_locked_ignored(common, &mut stderr);
+    warn_if_flags_ignored(common, &mut stderr);
 
     let check_args = pipeline::CheckArgs {
         metadata: common.metadata_options(),
@@ -278,7 +274,7 @@ fn run_check(common: &CommonArgs) -> Result<(), Error> {
 
 fn run_explain(explain: &ExplainArgs) -> Result<(), Error> {
     let mut stderr = io::stderr();
-    warn_if_locked_ignored(&explain.common, &mut stderr);
+    warn_if_flags_ignored(&explain.common, &mut stderr);
 
     let args = pipeline::ExplainArgs {
         metadata: explain.common.metadata_options(),
@@ -383,11 +379,39 @@ fn write_report_result(result: io::Result<()>) -> Result<(), Error> {
     }
 }
 
-fn warn_if_locked_ignored(common: &CommonArgs, stderr: &mut impl Write) {
-    if common.metadata_json.is_some() && (common.locked_flag || common.no_locked) {
+/// Warns about flags that `--metadata-json` renders inert.
+///
+/// Both are silent failure modes otherwise: the lock is enforced by whoever produced the
+/// document, and the feature flags shaped nothing, so a user who passes them only to the gate
+/// (and not to the `cargo metadata` that generated the JSON) would gate a default-features
+/// resolve without any diagnostic. `--offline` and `--cargo-timeout` are deliberately not
+/// warned about: they are inert but harmless, and CI templates pass them uniformly.
+fn warn_if_flags_ignored(common: &CommonArgs, stderr: &mut impl Write) {
+    if common.metadata_json.is_none() {
+        return;
+    }
+    if common.locked_flag || common.no_locked {
         let _ = writeln!(
             stderr,
             "warning: --locked is ignored under --metadata-json; the JSON may predate Cargo.lock"
+        );
+    }
+    let mut flags = Vec::new();
+    if !common.features.features.is_empty() {
+        flags.push("--features");
+    }
+    if common.features.all_features {
+        flags.push("--all-features");
+    }
+    if common.features.no_default_features {
+        flags.push("--no-default-features");
+    }
+    if !flags.is_empty() {
+        let _ = writeln!(
+            stderr,
+            "warning: {} ignored under --metadata-json; the JSON was produced with its own \
+             feature selection",
+            flags.join(", ")
         );
     }
 }

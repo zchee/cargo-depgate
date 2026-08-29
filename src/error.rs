@@ -37,14 +37,6 @@ pub enum Error {
         message: String,
     },
 
-    /// Temporary P0 scaffolding that P1, P2, and P4 of the implementation plan delete once
-    /// `check`, `explain`, and `schema` gain real behavior.
-    #[error("the {subcommand} subcommand is not implemented yet")]
-    NotYetImplemented {
-        /// The subcommand whose implementation has not landed yet.
-        subcommand: String,
-    },
-
     /// Spawning the `cargo metadata` child process failed.
     #[error("failed to spawn cargo metadata")]
     CargoMetadataSpawn {
@@ -140,7 +132,7 @@ impl Error {
     pub const fn exit_code(&self) -> u8 {
         match self {
             Self::PolicyViolations { .. } => 1,
-            Self::Configuration { .. } | Self::Usage { .. } | Self::NotYetImplemented { .. } => 2,
+            Self::Configuration { .. } | Self::Usage { .. } => 2,
             Self::ReportWrite { .. } => 4,
             Self::CargoMetadataSpawn { .. }
             | Self::CargoMetadataTimeout { .. }

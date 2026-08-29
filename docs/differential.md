@@ -10,8 +10,12 @@ rule (`internal`, `direct`) may see `+extra`.
 The example that produces the tables lives at `examples/guppy_diff.rs`:
 
 ```sh
+gzip -dc tests/fixtures/ganja-code-153bfb1/metadata.json.gz > /tmp/ganja-metadata.json
 cargo run --example guppy_diff -- /tmp/ganja-metadata.json
 ```
+
+The committed fixture is the same graph the tables were measured on, normalised to the
+`/fixture/ganja-code` workspace root (`scripts/fixture-ganja.sh --check` verifies its digest).
 
 `ours` is the number of distinct package **names** reachable from the member through
 normal edges (the member's own name excluded); `guppy` is the same count from guppy's

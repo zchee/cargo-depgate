@@ -1361,6 +1361,11 @@ fn optional_dependency_is_forwarded_by_cli_feature_flag() {
         .expect("app deny violation should be present");
     assert_eq!(violation["package"], "app");
     assert_eq!(violation["matches"][0]["name"], "reqwest-like");
+    assert_eq!(
+        report["features"],
+        serde_json::json!(["app/net"]),
+        "the report records the selection that shaped the graph, not the file's default"
+    );
 }
 
 #[test]
@@ -1427,4 +1432,101 @@ fn optional_dependency_is_forwarded_by_config_graph_feature_selection() {
         serde_json::from_slice(&output.stdout).expect("config-feature report should be JSON");
     assert_eq!(report["features"], "all");
     assert_eq!(report["violations"][0]["matches"][0]["name"], "reqwest-like");
+}
+
+#[test]
+fn a_discovered_config_at_the_workspace_root_gates_the_happy_path() {
+    // The primary way the tool is run: a `depgate.toml` beside the workspace `Cargo.toml`
+    // and no `--config`. Every other discovery test drives an error path, so a regression
+    // that broke discovery on the passing path would have gone unnoticed.
+    let fixture = basic_fixture_root();
+    let output = depgate()
+        .args(["check", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .arg("--offline")
+        .output()
+        .expect("cargo-depgate should execute the discovered-config check");
+
+    assert_eq!(output.status.code(), Some(0), "discovered-config check failed: {output:?}");
+    let stdout = cleaned_stdout(&output);
+    assert!(stdout.contains("ok: 8 rules, 0 violations"), "unexpected report: {stdout}");
+    // The rule ids prove the report came from the discovered file, not from a default policy.
+    for rule in ["rules.app.deny", "rules.util.leaf", "rules.tool.sealed"] {
+        assert!(stdout.contains(&format!("ok {rule}")), "{rule} missing from report: {stdout}");
+    }
+}
+
+#[test]
+fn json_features_reports_the_all_features_override() {
+    // The config selects nothing, so a `features` field taken from the file would say
+    // "default" while `--all-features` is what actually shaped the graph.
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let output = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &fixture.join("depgate.toml"),
+        &["--all-features", "--format", "json"],
+        false,
+    );
+
+    assert_eq!(output.status.code(), Some(1), "--all-features must reach the graph: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("all-features report should be JSON");
+    assert_eq!(report["features"], "all");
+    assert_eq!(report["violations"][0]["matches"][0]["name"], "reqwest-like");
+}
+
+#[test]
+fn json_features_is_null_when_no_cargo_ran() {
+    let (_temp, metadata) = ganja_metadata_json();
+    let output = depgate()
+        .args(["check", "--metadata-json"])
+        .arg(&metadata)
+        .args(["--workspace-root"])
+        .arg(ganja_fixture_root())
+        .args(["--config"])
+        .arg(ganja_config_path())
+        .args(["--format", "json"])
+        .output()
+        .expect("cargo-depgate should execute the metadata-backed check");
+
+    assert_eq!(output.status.code(), Some(0), "metadata-backed check failed: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("metadata report should be JSON");
+    assert_eq!(
+        report["features"],
+        serde_json::Value::Null,
+        "the document carries its own selection, which this process cannot observe"
+    );
+    assert!(
+        report.get("features").is_some(),
+        "the key stays present so a consumer can tell null from absent"
+    );
+}
+
+#[test]
+fn feature_flags_warn_when_metadata_json_makes_them_inert() {
+    let (_temp, metadata) = ganja_metadata_json();
+    let output = depgate()
+        .args(["check", "--metadata-json"])
+        .arg(&metadata)
+        .args(["--workspace-root"])
+        .arg(ganja_fixture_root())
+        .args(["--config"])
+        .arg(ganja_config_path())
+        // Never resolved: no Cargo runs, so the spec is not even checked for existence.
+        // That is precisely the silent failure the warning exists to break.
+        .args(["--all-features", "--features", "ganja-cli/tui", "--no-default-features"])
+        .output()
+        .expect("cargo-depgate should execute the metadata-backed check");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "inert flags must not change the verdict: {output:?}"
+    );
+    assert_eq!(
+        cleaned_stderr(&output).trim(),
+        "warning: --features, --all-features, --no-default-features ignored under \
+         --metadata-json; the JSON was produced with its own feature selection"
+    );
 }

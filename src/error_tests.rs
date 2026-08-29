@@ -15,7 +15,6 @@ fn error_cases() -> Vec<(Error, u8)> {
         (Error::Configuration { message: "invalid rule".to_owned(), span: None }, 2),
         (Error::ReportWrite { source: io::Error::other("disk full") }, 4),
         (Error::Usage { message: "missing argument".to_owned() }, 2),
-        (Error::NotYetImplemented { subcommand: "check".to_owned() }, 2),
         (
             Error::CargoMetadataSpawn {
                 source: io::Error::new(io::ErrorKind::NotFound, "cargo was not found"),

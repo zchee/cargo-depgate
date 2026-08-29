@@ -9,7 +9,7 @@ A high-performance dependency policy enforcer and CI gatekeeper for Cargo worksp
 * **Workspace Boundary Enforcement**: Prevent target-specific or internal crates from leaking across crate boundaries.
 * **Transitive Dependency Auditing**: Block banned crates or unvetted third-party additions anywhere in the closure.
 * **Deterministic Fail-Fast CI**: Emits structured diagnostics with precise exit codes tailored for GitHub Actions and automated workflows.
-* **Zero Compilation Overhead**: Evaluates `Cargo.lock` and metadata directly without compiling source code.
+* **Zero Compilation Overhead**: Evaluates the resolved `cargo metadata` graph directly without compiling source code.
 
 ## Install and run
 
@@ -187,7 +187,8 @@ therefore prints a warning and increments `counters.direct_optional_decls`.
   CLI feature flags.
 * Under `--metadata-json` no Cargo runs at all, so a non-default selection is ignored with
   `warning: [graph].features is ignored under --metadata-json; the JSON was produced with its own
-  feature selection`.
+  feature selection`. The CLI feature flags are inert on that path for the same reason and warn
+  the same way, and the JSON report's `features` is `null` rather than a value it cannot know.
 
 At a virtual workspace root, Cargo rejects bare feature names, so write `--features pkg/feature`.
 Feature arguments are forwarded to Cargo verbatim; any Cargo error is exit 3 with Cargo's own
@@ -243,6 +244,13 @@ carries every matching name it reached, an `internal` or `direct` violation carr
 `{tool, version, features, timings, counters, violations[]}`, where `counters` reports `packages`,
 `members`, `normal_edges`, `names`, `superset_extra_edges`, `direct_optional_decls`,
 `unrebased_path_deps`, `rules`, `violations` and `matches`.
+
+`features` is the selection the graph was **actually** resolved with, not the file's
+`[graph].features`: `"all"` for `--all-features` (or `features = "all"`), the array of specs for
+`--features`, `"default"` otherwise. Under `--metadata-json` it is `null` — no Cargo ran, so the
+selection that shaped the document is not observable here. The key is always present, so a CI
+job can compare it against the feature flags its build used and catch a gate that ran on a
+different graph than the release.
 
 `manifest.versions-in-root` is the exception to the cardinality above: it contributes **one
 `violations[]` element per offending dependency entry**, each anchored at the version span in that

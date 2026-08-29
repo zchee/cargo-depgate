@@ -214,7 +214,7 @@ pub fn render(
     let mut report = Report {
         tool: ctx.tool,
         version: ctx.version,
-        features: features_json(&outcome.features),
+        features: features_json(outcome.features.as_ref()),
         timings: TimingsJson::from_outcome(outcome),
         counters: outcome.counters.into(),
         violations: violations(outcome),
@@ -229,11 +229,14 @@ pub fn render(
     writeln!(out)
 }
 
-fn features_json(features: &FeatureSelection) -> serde_json::Value {
+/// `null` records that no Cargo ran (`--metadata-json`), so the selection that shaped the
+/// document is unknown to this process rather than being the default.
+fn features_json(features: Option<&FeatureSelection>) -> serde_json::Value {
     match features {
-        FeatureSelection::Default => serde_json::Value::String("default".to_owned()),
-        FeatureSelection::All => serde_json::Value::String("all".to_owned()),
-        FeatureSelection::List(features) => serde_json::Value::Array(
+        None => serde_json::Value::Null,
+        Some(FeatureSelection::Default) => serde_json::Value::String("default".to_owned()),
+        Some(FeatureSelection::All) => serde_json::Value::String("all".to_owned()),
+        Some(FeatureSelection::List(features)) => serde_json::Value::Array(
             features.iter().cloned().map(serde_json::Value::String).collect(),
         ),
     }

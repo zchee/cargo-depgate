@@ -81,8 +81,14 @@ pub struct Outcome {
     /// report layer uses this to prefix a witness path with the rule's own package and
     /// version without holding onto the borrowed Graph after `check()` returns.
     pub member_versions: BTreeMap<String, String>,
-    /// The effective feature selection for the JSON reporter and future `explain`/CLI use.
-    pub features: config::FeatureSelection,
+    /// The feature selection the graph was actually resolved with, or `None` when it is
+    /// unknowable because no Cargo ran (`--metadata-json`; the document carries its own).
+    ///
+    /// This is the *effective* selection, not the configured one: a command-line
+    /// `--features`/`--all-features` overrides `[graph].features`, so recording the file's
+    /// value would misreport exactly the "released with `--features cloud`, gated on default"
+    /// drift the field exists to expose.
+    pub features: Option<config::FeatureSelection>,
     /// The policy result exit code (`0` for a pass, `1` for violations).
     pub exit: u8,
 }
@@ -174,7 +180,7 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
         counters,
         timings,
         member_versions,
-        features: validated.config.features.clone(),
+        features: effective_features(&metadata_options, &validated.config.features),
         exit,
     })
 }
@@ -310,6 +316,36 @@ pub(crate) fn spawn_options(
         config::FeatureSelection::List(list) => options.features.clone_from(list),
     }
     options
+}
+
+/// The feature selection the graph was actually resolved with, read back from the options that
+/// reached `cargo metadata` after [`spawn_options`] merged `[graph].features` into them.
+///
+/// `--all-features` (or `features = "all"`) is [`config::FeatureSelection::All`], a non-empty
+/// list is [`config::FeatureSelection::List`], and anything else leaves `configured` in force —
+/// which at this point can only be the default, since a non-default *discovered* selection is
+/// rejected before the graph is evaluated ([`feature_selection_after_metadata`]).
+///
+/// `None` means "no Cargo ran": under `--metadata-json` the document was resolved elsewhere with
+/// a selection this process cannot observe, so reporting any value would be a guess.
+///
+/// A bare `--no-default-features` is not represented. Cargo combines it with the selection rather
+/// than replacing it, and the enum has no variant for that combination; the reported value stays
+/// the selection it was combined with.
+pub(crate) fn effective_features(
+    options: &metadata::MetadataOptions,
+    configured: &config::FeatureSelection,
+) -> Option<config::FeatureSelection> {
+    if options.source.is_some() {
+        return None;
+    }
+    if options.all_features {
+        return Some(config::FeatureSelection::All);
+    }
+    if options.features.is_empty() {
+        return Some(configured.clone());
+    }
+    Some(config::FeatureSelection::List(options.features.clone()))
 }
 
 /// Whether the CLI made a feature *selection* that supersedes `[graph].features`.

@@ -55,7 +55,7 @@ fn violation(rule_id: &str, kind: &'static str, line: u32) -> Violation {
     }
 }
 
-fn outcome(features: FeatureSelection) -> Outcome {
+fn outcome(features: Option<FeatureSelection>) -> Outcome {
     let deny_id = "rules.app.deny";
     let internal_id = "rules.app.internal";
     let direct_id = "rules.app.direct";
@@ -130,7 +130,7 @@ fn outcome(features: FeatureSelection) -> Outcome {
     }
 }
 
-fn render_outcome(features: FeatureSelection) -> String {
+fn render_outcome(features: Option<FeatureSelection>) -> String {
     let mut bytes = Vec::new();
     let context = RenderContext {
         workspace_root: PathBuf::from(WORKSPACE),
@@ -144,7 +144,7 @@ fn render_outcome(features: FeatureSelection) -> String {
 
 #[test]
 fn report_preserves_schema_order_and_represents_every_violation_kind() {
-    let rendered = render_outcome(FeatureSelection::Default);
+    let rendered = render_outcome(Some(FeatureSelection::Default));
     let value: serde_json::Value =
         serde_json::from_str(&rendered).expect("the reporter should emit valid JSON");
 
@@ -196,9 +196,22 @@ fn report_preserves_schema_order_and_represents_every_violation_kind() {
 
 #[test]
 fn feature_list_is_a_bare_json_array() {
-    let rendered = render_outcome(FeatureSelection::List(vec!["a/b".to_owned()]));
+    let rendered = render_outcome(Some(FeatureSelection::List(vec!["a/b".to_owned()])));
     let value: serde_json::Value =
         serde_json::from_str(&rendered).expect("the reporter should emit valid JSON");
 
     assert_eq!(value["features"], serde_json::json!(["a/b"]));
+}
+
+#[test]
+fn an_unknown_feature_selection_is_json_null() {
+    let rendered = render_outcome(None);
+    let value: serde_json::Value =
+        serde_json::from_str(&rendered).expect("the reporter should emit valid JSON");
+
+    assert_eq!(value["features"], serde_json::Value::Null);
+    assert!(
+        rendered.contains("\"features\": null"),
+        "the key stays present so consumers can tell null from absent: {rendered}"
+    );
 }

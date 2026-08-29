@@ -52,7 +52,7 @@ fn outcome(
         warnings: Vec::new(),
         workspace_root: root.to_path_buf(),
         member_versions,
-        features: FeatureSelection::Default,
+        features: Some(FeatureSelection::Default),
         counters: Counters {
             rules: violation_count.max(1),
             violations: violation_count,

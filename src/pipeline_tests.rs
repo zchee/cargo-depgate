@@ -338,7 +338,10 @@ fn passing_direct_rule_populates_counters_and_warning() {
     );
     assert!(outcome.manifest.is_none(), "versions-in-root = false must skip the manifest rule");
     assert_eq!(outcome.member_versions.get("app").map(String::as_str), Some("0.1.0"));
-    assert_eq!(outcome.features, FeatureSelection::Default);
+    assert_eq!(
+        outcome.features, None,
+        "no cargo ran, so the selection that shaped the document is unknowable"
+    );
     let warning = "warning: rules.app.direct: app declares optional dependency dep; sibling feature unification may add it to the resolved edge set\n";
     assert_eq!(outcome.warnings, vec![warning.trim_end().to_owned()]);
     assert_eq!(stderr, warning);
@@ -480,6 +483,41 @@ fn discovered_non_default_features_are_an_error_and_json_input_only_warns() {
     let mut cli = spawn_base();
     cli.all_features = true;
     assert!(feature_selection_after_metadata(false, &cli, &all).is_ok_and(|w| w.is_none()));
+}
+
+#[test]
+fn the_reported_selection_is_the_one_that_reached_the_spawn() {
+    // The options passed here are the post-`spawn_options` ones, exactly as `check` reads them.
+    let base = spawn_base();
+    assert_eq!(
+        effective_features(&base, &FeatureSelection::Default),
+        Some(FeatureSelection::Default)
+    );
+
+    let mut all = spawn_base();
+    all.all_features = true;
+    assert_eq!(
+        effective_features(&all, &FeatureSelection::Default),
+        Some(FeatureSelection::All),
+        "--all-features wins over the file's default"
+    );
+
+    let mut list = spawn_base();
+    list.features.push("app/net".to_owned());
+    assert_eq!(
+        effective_features(&list, &FeatureSelection::All),
+        Some(FeatureSelection::List(vec!["app/net".to_owned()])),
+        "a CLI --features list wins over features = \"all\""
+    );
+
+    let mut json = spawn_base();
+    json.source = Some(MetadataSource::Stdin);
+    json.all_features = true;
+    assert_eq!(
+        effective_features(&json, &FeatureSelection::All),
+        None,
+        "no cargo ran under --metadata-json, so the flags shaped nothing"
+    );
 }
 
 #[test]

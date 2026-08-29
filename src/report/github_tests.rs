@@ -93,7 +93,7 @@ fn outcome(graph_count: usize, manifest_entries: Vec<ManifestViolation>) -> Outc
         counters: Counters { rules, violations: rules, matches: rules, ..Counters::default() },
         timings: Timings::default(),
         member_versions: BTreeMap::from([("app".to_owned(), "1.0.0".to_owned())]),
-        features: FeatureSelection::Default,
+        features: Some(FeatureSelection::Default),
         exit: 1,
     }
 }

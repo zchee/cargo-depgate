@@ -275,7 +275,7 @@ fn human_report_prints_manifest_entries_relative_to_the_workspace_root() {
         counters: Counters { rules: 2, violations: 1, ..Counters::default() },
         timings: Timings::start(),
         member_versions: BTreeMap::from([("app".to_owned(), "0.1.0".to_owned())]),
-        features: FeatureSelection::Default,
+        features: Some(FeatureSelection::Default),
         exit: 1,
     };
 
@@ -307,7 +307,7 @@ fn plain_report_marks_a_clean_manifest_rule_ok() {
         counters: Counters { rules: 1, ..Counters::default() },
         timings: Timings::start(),
         member_versions: BTreeMap::new(),
-        features: FeatureSelection::Default,
+        features: Some(FeatureSelection::Default),
         exit: 0,
     };
 
