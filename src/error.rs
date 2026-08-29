@@ -1,6 +1,6 @@
 //! Error types and process exit-code mappings.
 
-use std::{io, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 /// An error produced while evaluating or preparing a dependency policy command.
 #[derive(Debug, thiserror::Error)]
@@ -44,10 +44,18 @@ pub enum Error {
     },
 
     /// The `cargo metadata` child process exceeded its allowed runtime.
-    #[error("cargo metadata timed out after {timeout:?}")]
+    #[error("cargo metadata exceeded --cargo-timeout={}s", timeout.as_secs())]
     CargoMetadataTimeout {
         /// The maximum runtime allowed for the child process.
         timeout: Duration,
+    },
+
+    /// Reading the piped standard output of the `cargo metadata` child process failed.
+    #[error("failed to read cargo metadata output")]
+    CargoMetadataRead {
+        /// The operating-system error returned while reading the pipe.
+        #[source]
+        source: io::Error,
     },
 
     /// The `cargo metadata` child process exited unsuccessfully.
@@ -70,6 +78,29 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+
+    /// Reading precomputed `cargo metadata` JSON (`--metadata-json`) failed.
+    #[error("failed to read cargo metadata JSON from {}", path.display())]
+    MetadataRead {
+        /// The file that was being read; `-` names standard input.
+        path: PathBuf,
+        /// The operating-system error returned while reading.
+        #[source]
+        source: io::Error,
+    },
+
+    /// The metadata parsed, but violates an invariant the policy engine relies on.
+    ///
+    /// These are the fail-closed input checks: a missing `resolve`, an edge without
+    /// `dep_kinds`, an unresolvable package id, an empty member list, a node/package
+    /// mismatch, a duplicate id, or a workspace member manifest that cannot be rebased
+    /// under `--workspace-root`. Silently skipping any of them could let a containment
+    /// rule pass vacuously.
+    #[error("invalid cargo metadata: {message}")]
+    MetadataInvalid {
+        /// A description of the violated invariant.
+        message: String,
+    },
 }
 
 impl Error {
@@ -81,8 +112,11 @@ impl Error {
             Self::Configuration { .. } | Self::Usage { .. } | Self::NotYetImplemented { .. } => 2,
             Self::CargoMetadataSpawn { .. }
             | Self::CargoMetadataTimeout { .. }
+            | Self::CargoMetadataRead { .. }
             | Self::CargoMetadataFailed { .. }
-            | Self::CargoMetadataUnparseable { .. } => 3,
+            | Self::CargoMetadataUnparseable { .. }
+            | Self::MetadataRead { .. }
+            | Self::MetadataInvalid { .. } => 3,
         }
     }
 }

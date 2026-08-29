@@ -1,5 +1,7 @@
 #![expect(clippy::expect_used, reason = "test bodies assert directly")]
 
+use std::time::Duration;
+
 use clap::error::ErrorKind;
 
 use super::*;
@@ -62,9 +64,22 @@ fn check_defaults_match_the_p0_contract() {
     let args = parse(&["cargo-depgate", "check"]);
     let common = common_args(&args);
 
-    assert_eq!(common.cargo_timeout, 300);
+    assert_eq!(common.cargo_timeout, DEFAULT_TIMEOUT_SECS);
+    assert_eq!(common.cargo_timeout, 300, "the P0 contract pins the default at 300 s");
     assert!(args.locked());
     assert_eq!(common.format, None);
+}
+
+#[test]
+fn cargo_timeout_zero_is_rejected_and_one_is_the_minimum() {
+    let error = parse_from(["cargo-depgate", "check", "--cargo-timeout", "0"])
+        .expect_err("a zero timeout would fire before cargo can answer");
+
+    assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
+    assert!(error.to_string().contains("--cargo-timeout"), "{error}");
+
+    let one = parse(&["cargo-depgate", "check", "--cargo-timeout", "1"]);
+    assert_eq!(common_args(&one).cargo_timeout, 1);
 }
 
 #[test]
@@ -80,6 +95,14 @@ fn no_locked_disables_the_effective_locked_setting() {
 fn metadata_json_dash_means_stdin_and_any_other_value_is_a_file() {
     let stdin = parse(&["cargo-depgate", "--metadata-json", "-"]);
     let file = parse(&["cargo-depgate", "--metadata-json", "./-"]);
+
+    assert_eq!(common_args(&stdin).metadata_json, Some(MetadataSource::Stdin));
+    assert_eq!(common_args(&file).metadata_json, Some(MetadataSource::File(PathBuf::from("./-"))));
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_metadata_json_path_is_a_file() {
     let non_utf8 = parse_from([
         OsString::from("cargo-depgate"),
         OsString::from("--metadata-json"),
@@ -87,8 +110,6 @@ fn metadata_json_dash_means_stdin_and_any_other_value_is_a_file() {
     ])
     .expect("non-UTF-8 metadata paths must parse");
 
-    assert_eq!(common_args(&stdin).metadata_json, Some(MetadataSource::Stdin));
-    assert_eq!(common_args(&file).metadata_json, Some(MetadataSource::File(PathBuf::from("./-"))));
     assert!(matches!(common_args(&non_utf8).metadata_json, Some(MetadataSource::File(_))));
 }
 
@@ -147,4 +168,60 @@ fn every_p0_subcommand_returns_its_named_stub_error() {
             Error::NotYetImplemented { ref subcommand } if subcommand == expected_name
         ));
     }
+}
+
+#[test]
+fn metadata_options_project_every_cargo_facing_flag() {
+    let args = parse(&[
+        "cargo-depgate",
+        "check",
+        "--manifest-path",
+        "/ws/Cargo.toml",
+        "--features",
+        "pkg/feat",
+        "--features",
+        "other",
+        "--all-features",
+        "--no-default-features",
+        "--offline",
+        "--no-locked",
+        "--cargo-timeout",
+        "7",
+        "--metadata-json",
+        "meta.json",
+        "--workspace-root",
+        "/checkout",
+    ]);
+
+    let options = args.metadata_options().expect("check has metadata options");
+
+    assert_eq!(
+        options,
+        MetadataOptions {
+            cargo: None,
+            manifest_path: Some(PathBuf::from("/ws/Cargo.toml")),
+            features: vec!["pkg/feat".to_owned(), "other".to_owned()],
+            all_features: true,
+            no_default_features: true,
+            offline: true,
+            locked: false,
+            timeout: Duration::from_secs(7),
+            source: Some(MetadataSource::File(PathBuf::from("meta.json"))),
+            workspace_root: Some(PathBuf::from("/checkout")),
+        }
+    );
+}
+
+#[test]
+fn metadata_options_defaults_match_the_library_defaults_and_schema_has_none() {
+    let implicit = parse(&["cargo-depgate"]);
+    let explain = parse(&["cargo-depgate", "explain", "a", "b", "--metadata-json", "-"]);
+    let schema = parse(&["cargo-depgate", "schema"]);
+
+    assert_eq!(implicit.metadata_options(), Some(MetadataOptions::default()));
+    let explain = explain.metadata_options().expect("explain shares the common flags");
+    assert_eq!(explain.source, Some(MetadataSource::Stdin));
+    assert!(explain.locked);
+    assert_eq!(schema.metadata_options(), None);
+    assert!(schema.locked());
 }

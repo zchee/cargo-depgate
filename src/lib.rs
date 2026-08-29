@@ -2,3 +2,6 @@
 
 pub mod cli;
 pub mod error;
+pub mod graph;
+pub mod metadata;
+pub mod timings;

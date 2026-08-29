@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 use super::*;
 
@@ -22,9 +22,30 @@ fn error_cases() -> Vec<(Error, u8)> {
             3,
         ),
         (Error::CargoMetadataTimeout { timeout: Duration::from_secs(300) }, 3),
+        (
+            Error::CargoMetadataRead {
+                source: io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"),
+            },
+            3,
+        ),
         (Error::CargoMetadataFailed { status: Some(101) }, 3),
         (Error::CargoMetadataUnparseable { source: invalid_json_error() }, 3),
+        (
+            Error::MetadataRead {
+                path: PathBuf::from("metadata.json"),
+                source: io::Error::new(io::ErrorKind::NotFound, "missing"),
+            },
+            3,
+        ),
+        (Error::MetadataInvalid { message: "resolve is null".to_owned() }, 3),
     ]
+}
+
+#[test]
+fn timeout_message_names_the_flag_and_the_whole_seconds() {
+    let error = Error::CargoMetadataTimeout { timeout: Duration::from_secs(1) };
+
+    assert_eq!(error.to_string(), "cargo metadata exceeded --cargo-timeout=1s");
 }
 
 #[test]

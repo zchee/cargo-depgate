@@ -1,11 +1,14 @@
 //! Command-line grammar and P0 command dispatch.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum, builder::TypedValueParser as _};
 use clap_cargo::{Features, Manifest, style::CLAP_STYLING};
 
-use crate::error::Error;
+use crate::{
+    error::Error,
+    metadata::{DEFAULT_TIMEOUT_SECS, MetadataOptions},
+};
 
 /// Parsed command-line arguments for `cargo depgate`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
@@ -33,11 +36,23 @@ impl Args {
     /// This defaults to `true`; `--no-locked` changes it to `false`.
     #[must_use]
     pub fn locked(&self) -> bool {
+        self.common_args().is_none_or(CommonArgs::locked)
+    }
+
+    /// The metadata acquisition options for this command; `None` for `schema`,
+    /// which never touches cargo.
+    #[must_use]
+    pub fn metadata_options(&self) -> Option<MetadataOptions> {
+        self.common_args().map(CommonArgs::metadata_options)
+    }
+
+    /// The shared flags of `check`/`explain`; `None` for `schema`.
+    pub(crate) fn common_args(&self) -> Option<&CommonArgs> {
         match &self.command {
-            Some(Command::Check(args)) => args.locked(),
-            Some(Command::Explain(args)) => args.common.locked(),
-            Some(Command::Schema) => true,
-            None => self.check.locked(),
+            Some(Command::Check(args)) => Some(args),
+            Some(Command::Explain(args)) => Some(&args.common),
+            Some(Command::Schema) => None,
+            None => Some(&self.check),
         }
     }
 }
@@ -71,7 +86,7 @@ struct ExplainArgs {
     clippy::struct_excessive_bools,
     reason = "the CLI grammar intentionally represents independent boolean flags"
 )]
-struct CommonArgs {
+pub(crate) struct CommonArgs {
     #[command(flatten)]
     manifest: Manifest,
 
@@ -106,8 +121,13 @@ struct CommonArgs {
     #[arg(long, conflicts_with = "locked_flag")]
     no_locked: bool,
 
-    /// Maximum number of seconds allowed for `cargo metadata`.
-    #[arg(long, value_name = "SECS", default_value_t = 300)]
+    /// Maximum number of seconds allowed for `cargo metadata` (at least 1).
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value_t = DEFAULT_TIMEOUT_SECS,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     cargo_timeout: u64,
 
     /// Select the diagnostic output format.
@@ -127,6 +147,26 @@ impl CommonArgs {
     /// `--locked` names the default; only `--no-locked` changes it.
     const fn locked(&self) -> bool {
         !self.no_locked
+    }
+
+    /// Projects the cargo-facing flags onto [`MetadataOptions`].
+    ///
+    /// `--features` entries are forwarded verbatim; `--offline` and `--cargo-timeout`
+    /// are carried even under `--metadata-json`, where [`crate::metadata::acquire`]
+    /// leaves them inert.
+    pub(crate) fn metadata_options(&self) -> MetadataOptions {
+        MetadataOptions {
+            cargo: None,
+            manifest_path: self.manifest.manifest_path.clone(),
+            features: self.features.features.clone(),
+            all_features: self.features.all_features,
+            no_default_features: self.features.no_default_features,
+            offline: self.offline,
+            locked: self.locked(),
+            timeout: Duration::from_secs(self.cargo_timeout),
+            source: self.metadata_json.clone(),
+            workspace_root: self.workspace_root.clone(),
+        }
     }
 }
 
