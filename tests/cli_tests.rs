@@ -66,7 +66,7 @@ fn strip_cargo_status_lines(stderr: &[u8]) -> Vec<u8> {
     let mut kept = String::with_capacity(text.len());
     for line in text.lines() {
         let clean = strip_ansi(line);
-        let first_word = clean.trim_start().split_whitespace().next().unwrap_or("");
+        let first_word = clean.split_whitespace().next().unwrap_or("");
         if CARGO_STATUS_VERBS.contains(&first_word) {
             continue;
         }
