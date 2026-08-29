@@ -1,0 +1,13 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stdout(&output)
+---
+ok rules.app.deny
+ok rules.app.internal
+ok rules.core.internal
+ok rules.util.leaf
+ok rules.util.direct
+ok rules.tool.direct
+ok rules.tool.sealed
+ok manifest.versions-in-root
+ok: 8 rules, 0 violations

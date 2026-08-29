@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: rules.foo declares both leaf and internal
+ --> <ROOT>/tests/fixtures/ws-config-errors/leaf-and-internal.toml:4:8
+  |
+4 | leaf = true
+  |        ^^^^ here

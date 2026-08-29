@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: depgate.toml declares no rules
+ --> <ROOT>/tests/fixtures/ws-config-errors/zero-rules.toml:1:1
+  |
+1 | schema = 1
+  | ^^^^^^^^^^ here

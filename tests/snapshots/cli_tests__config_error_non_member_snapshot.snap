@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: rules.nonexistent-pkg targets non-member workspace package
+ --> <ROOT>/tests/fixtures/ws-config-errors/non-member.toml:4:8
+  |
+4 | deny = ["ratatui"]
+  |        ^^^^^^^^^^^ here

@@ -27,7 +27,7 @@ The supported Cargo feature matrix will be documented in a later implementation 
 
 ## Exit codes
 
-Exit codes are 0 for success, 1 for policy violations, 2 for configuration or usage errors, and 3 for `cargo metadata` failures.
+Exit codes are 0 for success, 1 for policy violations, 2 for configuration or usage errors, 3 for `cargo metadata` failures, and 4 when the rendered report, `explain` output, or configuration schema could not be written (a closed reader, such as piping through `head`, is not treated as a failure).
 
 <!-- depgate:ci -->
 

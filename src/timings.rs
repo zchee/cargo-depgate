@@ -96,6 +96,12 @@ impl Timings {
     }
 
     /// Sets [`Phase::Total`] to the wall time since [`Timings::start`].
+    ///
+    /// This method is idempotent and re-callable: each call re-derives `Total` from wall time
+    /// since `start`; it does not accumulate across calls. The pipeline calls it once so
+    /// `Outcome.timings.millis(Phase::Total)` is populated for library consumers that never
+    /// render a report, and `cli::run_check` calls it a second time after timing the render so
+    /// the `--timings` output's `total` line includes the report phase.
     pub fn finish(&mut self) {
         self.millis[Phase::Total as usize] = self.started.elapsed().as_secs_f64() * 1e3;
     }

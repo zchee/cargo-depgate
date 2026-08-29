@@ -7,5 +7,6 @@ pub mod graph;
 pub mod manifest;
 pub mod metadata;
 pub mod pipeline;
+pub mod report;
 pub mod rules;
 pub mod timings;

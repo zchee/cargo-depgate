@@ -22,6 +22,14 @@ pub enum Error {
         span: Option<crate::config::Span>,
     },
 
+    /// Writing the rendered report, `explain` output, or configuration schema failed.
+    #[error("failed to write command output")]
+    ReportWrite {
+        /// The operating-system error returned while writing.
+        #[source]
+        source: io::Error,
+    },
+
     /// The requested command or arguments are invalid.
     #[error("usage error: {message}")]
     Usage {
@@ -133,6 +141,7 @@ impl Error {
         match self {
             Self::PolicyViolations { .. } => 1,
             Self::Configuration { .. } | Self::Usage { .. } | Self::NotYetImplemented { .. } => 2,
+            Self::ReportWrite { .. } => 4,
             Self::CargoMetadataSpawn { .. }
             | Self::CargoMetadataTimeout { .. }
             | Self::CargoMetadataRead { .. }

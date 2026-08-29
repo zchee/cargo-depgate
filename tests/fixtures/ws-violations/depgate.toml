@@ -1,0 +1,16 @@
+schema = 1
+
+[manifest]
+versions-in-root = false
+
+[rules.core]
+deny = ["ui"]
+internal = []
+direct = ["tool"]
+sealed = true
+
+[rules.tool]
+leaf = true
+
+[rules.ui]
+leaf = true

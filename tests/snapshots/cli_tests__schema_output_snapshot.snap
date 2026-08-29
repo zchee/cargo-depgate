@@ -1,0 +1,158 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stdout(&output)
+---
+{
+  "$defs": {
+    "ConfigGraphSchema": {
+      "additionalProperties": false,
+      "description": "Plain graph settings used by [`ConfigSchema`].",
+      "properties": {
+        "features": {
+          "$ref": "#/$defs/FeatureValue",
+          "description": "Cargo feature selection: `default`, `all`, or a list of feature specs."
+        }
+      },
+      "type": "object"
+    },
+    "ConfigInternalSchema": {
+      "additionalProperties": false,
+      "description": "Plain internal settings used by [`ConfigSchema`].",
+      "properties": {
+        "members": {
+          "default": true,
+          "description": "Whether workspace members are automatically internal.",
+          "type": "boolean"
+        },
+        "patterns": {
+          "default": [],
+          "description": "Additional internal package-name glob patterns.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ConfigManifestSchema": {
+      "additionalProperties": false,
+      "description": "Plain manifest settings used by [`ConfigSchema`].",
+      "properties": {
+        "versions-in-root": {
+          "default": true,
+          "description": "Whether the root manifest version is checked.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ConfigRuleSchema": {
+      "additionalProperties": false,
+      "description": "Plain per-package rule settings used by [`ConfigSchema`].",
+      "properties": {
+        "deny": {
+          "default": null,
+          "description": "Dependency names or glob patterns denied by the rule.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "direct": {
+          "default": null,
+          "description": "Exact package names required as direct dependencies.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "internal": {
+          "default": null,
+          "description": "Exact package names required to be internal.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "leaf": {
+          "default": null,
+          "description": "Whether the package must be a leaf.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sealed": {
+          "default": null,
+          "description": "Whether the package's normal dependency set must be sealed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "FeatureValue": {
+      "anyOf": [
+        {
+          "description": "A named selection (`default` or `all`).",
+          "type": "string"
+        },
+        {
+          "description": "Explicit Cargo feature specifications.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "The non-spanned feature input accepted by TOML and the schema generator."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The plain, schema-facing representation of a configuration.",
+  "properties": {
+    "graph": {
+      "$ref": "#/$defs/ConfigGraphSchema",
+      "description": "Graph feature settings."
+    },
+    "internal": {
+      "$ref": "#/$defs/ConfigInternalSchema",
+      "description": "Internal package settings."
+    },
+    "manifest": {
+      "$ref": "#/$defs/ConfigManifestSchema",
+      "description": "Manifest settings."
+    },
+    "rules": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ConfigRuleSchema"
+      },
+      "description": "Rules keyed by workspace package name.",
+      "type": "object"
+    },
+    "schema": {
+      "description": "The configuration schema version.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema"
+  ],
+  "title": "ConfigSchema",
+  "type": "object"
+}

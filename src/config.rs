@@ -638,6 +638,16 @@ pub fn discover(workspace_root: &Path) -> PathBuf {
     workspace_root.join("depgate.toml")
 }
 
+/// Builds the "unknown package" diagnostic shared by every place a configured or
+/// requested package name fails to resolve against the graph: `phase_b`'s rule
+/// validation and `pipeline::explain`'s package/dependency lookups use the same
+/// wording with a different `context` prefix, so the message never drifts between
+/// call sites.
+#[must_use]
+pub fn unknown_package_message(context: &str, name: &str) -> String {
+    format!("{context} references unknown package `{name}`")
+}
+
 /// Validates a raw configuration, optionally against a dependency graph.
 ///
 /// Graph-independent checks always run before any graph lookup. Passing `None` is
@@ -786,10 +796,7 @@ fn phase_b(validated: &mut Validated, graph: &Graph<'_>) -> Result<(), ConfigErr
             for name in names {
                 if graph.lookup_name(name).is_none() {
                     return Err(ConfigError {
-                        message: format!(
-                            "rules.{} references unknown package `{name}`",
-                            rule.package
-                        ),
+                        message: unknown_package_message(&format!("rules.{}", rule.package), name),
                         span: Some(rule.span.clone()),
                     });
                 }

@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: error parsing glob 'a[b': unclosed character class; missing ']'
+ --> <ROOT>/tests/fixtures/ws-config-errors/bad-glob.toml:4:9
+  |
+4 | deny = ["a[b"]
+  |         ^^^^^^ here

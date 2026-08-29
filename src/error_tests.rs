@@ -13,6 +13,7 @@ fn error_cases() -> Vec<(Error, u8)> {
     vec![
         (Error::PolicyViolations { count: 2 }, 1),
         (Error::Configuration { message: "invalid rule".to_owned(), span: None }, 2),
+        (Error::ReportWrite { source: io::Error::other("disk full") }, 4),
         (Error::Usage { message: "missing argument".to_owned() }, 2),
         (Error::NotYetImplemented { subcommand: "check".to_owned() }, 2),
         (

@@ -1,6 +1,9 @@
 //! Evaluation of dependency graph rules and their witnesses.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    time::{Duration, Instant},
+};
 
 use crate::{
     config::{Config, Rule, RuleKind, Span},
@@ -17,6 +20,7 @@ use crate::{
 #[must_use]
 pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Evaluation {
     scratch.reset_extra();
+    let mut traversal_time = Duration::ZERO;
 
     let internal_mask = internal_mask(graph, config);
     let groups = group_rules(config);
@@ -25,7 +29,7 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
         .iter()
         .map(|rule| RuleStatus {
             id: rule.id.clone(),
-            package: rule.package.clone(),
+            package: Some(rule.package.clone()),
             kind: kind_name(&rule.kind),
             passed: false,
             matched: 0,
@@ -69,7 +73,9 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
             )
         });
         if needs_forward {
+            let started = Instant::now();
             let reach = graph.reach(root, scratch);
+            traversal_time += started.elapsed();
             for &index in &indices {
                 let result = match &config.rules[index].kind {
                     RuleKind::Deny { exact, globs, .. } => {
@@ -100,7 +106,9 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
         let needs_reverse =
             indices.iter().any(|&index| matches!(config.rules[index].kind, RuleKind::Sealed));
         if needs_reverse {
+            let started = Instant::now();
             let reverse = graph.reverse_reach(root, scratch);
+            traversal_time += started.elapsed();
             for &index in &indices {
                 if matches!(config.rules[index].kind, RuleKind::Sealed) {
                     let result = evaluate_sealed(&config.rules[index], graph, &reverse);
@@ -116,6 +124,7 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
         violations,
         matches,
         superset_extra_edges: scratch.superset_extra_edges(),
+        traversal_time,
     }
 }
 
@@ -131,6 +140,10 @@ pub struct Evaluation {
     pub matches: u32,
     /// The union of cfg-only and member-optional edges traversed by all BFS runs.
     pub superset_extra_edges: u32,
+    /// Wall time spent inside every forward and reverse BFS this evaluation ran,
+    /// summed across roots — lets the pipeline split `Phase::Traversals` from
+    /// `Phase::Evaluate` without touching `graph.rs`.
+    pub traversal_time: Duration,
 }
 
 /// The pass/fail status of one configured rule.
@@ -139,8 +152,8 @@ pub struct Evaluation {
 pub struct RuleStatus {
     /// The stable rule identifier.
     pub id: String,
-    /// The workspace package targeted by the rule.
-    pub package: String,
+    /// The workspace package targeted by the rule, or `None` for the manifest rule.
+    pub package: Option<String>,
     /// The rule kind (`deny`, `internal`, `leaf`, `direct`, or `sealed`).
     pub kind: &'static str,
     /// Whether the rule passed.
@@ -455,7 +468,8 @@ fn path_match(graph: &Graph<'_>, path: &[u32], others: &[u32]) -> Match {
     Match { name, version, witness: witness_hops(graph, path), other_versions }
 }
 
-fn witness_hops(graph: &Graph<'_>, path: &[u32]) -> Vec<WitnessHop> {
+/// Converts a raw node path into witness hops with cfg/optional annotations.
+pub(crate) fn witness_hops(graph: &Graph<'_>, path: &[u32]) -> Vec<WitnessHop> {
     path.windows(2)
         .map(|pair| {
             let from = pair[0];
@@ -474,6 +488,7 @@ fn witness_hops(graph: &Graph<'_>, path: &[u32]) -> Vec<WitnessHop> {
         .collect()
 }
 
+/// Returns joined `cfg(...)` targets for an edge, or `None` when unconditional.
 fn cfg_target(graph: &Graph<'_>, edge: u32) -> Option<String> {
     if !graph.edge_is_cfg_only(edge) {
         return None;

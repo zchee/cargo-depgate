@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: rules.app references unknown package `totally-unknown-name`
+ --> <ROOT>/tests/fixtures/ws-config-errors/unknown-direct.toml:4:10
+  |
+4 | direct = ["totally-unknown-name"]
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^ here

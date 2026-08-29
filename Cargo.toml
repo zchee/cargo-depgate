@@ -38,11 +38,13 @@ toml = { version = "1.1.4", features = ["preserve_order"] }
 globset = "0.4.20"
 schemars = "1.2.2"
 indexmap = { version = "2.14.1", features = ["serde"] }
+annotate-snippets = "0.12.16"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
 guppy = "0.18.0"
 tempfile = "3"
+insta = { version = "1.48.0", features = ["filters"] }
 
 [lints.rust]
 unsafe_code = "deny"

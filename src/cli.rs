@@ -1,23 +1,22 @@
 //! Command-line grammar and command dispatch.
 
 use std::{
-    collections::HashMap,
     ffi::OsString,
     io::{self, Write},
-    path::{Path, PathBuf},
-    time::Duration,
+    path::PathBuf,
+    time::{Duration, Instant},
 };
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum, builder::TypedValueParser as _};
+use clap::{ArgAction, Parser, Subcommand, builder::TypedValueParser as _};
 use clap_cargo::{Features, Manifest, style::CLAP_STYLING};
 use schemars::schema_for;
 
 use crate::{
     config::ConfigSchema,
     error::Error,
-    manifest,
     metadata::{DEFAULT_TIMEOUT_SECS, MetadataOptions},
     pipeline,
+    report::{self, Format as ReportFormat, RenderContext},
 };
 
 /// Parsed command-line arguments for `cargo depgate`.
@@ -142,7 +141,7 @@ pub(crate) struct CommonArgs {
 
     /// Select the diagnostic output format.
     #[arg(long, value_enum)]
-    format: Option<Format>,
+    format: Option<ReportFormat>,
 
     /// Report command timings.
     #[arg(long)]
@@ -196,13 +195,6 @@ impl From<OsString> for MetadataSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum Format {
-    Human,
-    Json,
-    Github,
-}
-
 /// Parses direct `cargo-depgate` and Cargo-plugin `cargo depgate` arguments.
 ///
 /// A `depgate` token immediately following the executable name is removed
@@ -231,12 +223,9 @@ where
 
 /// Runs a parsed command.
 ///
-/// `check` runs the pipeline and emits its plain placeholder report: one
-/// `ok <id>` / `FAIL <id>: …` line per rule (one line per entry for the manifest
-/// rule) and an `ok:|FAIL: <N> rules, <V> violations` summary. The `--format`
-/// value is accepted by the grammar but intentionally ignored until the P4 human,
-/// JSON, and GitHub reporters land. `schema` prints the generated configuration
-/// schema; `explain` remains a named P0 stub.
+/// `check` evaluates the configured policy and renders the selected human, JSON, or GitHub
+/// report. `explain` resolves one dependency witness without applying policy rules, while
+/// `schema` prints the generated configuration schema.
 ///
 /// # Errors
 ///
@@ -246,32 +235,116 @@ pub fn run(args: &Args) -> Result<(), Error> {
     match &args.command {
         None => run_check(&args.check),
         Some(Command::Check(common)) => run_check(common),
-        Some(Command::Explain(_)) => {
-            Err(Error::NotYetImplemented { subcommand: "explain".to_owned() })
-        }
+        Some(Command::Explain(explain)) => run_explain(explain),
         Some(Command::Schema) => run_schema(),
     }
 }
 
 fn run_check(common: &CommonArgs) -> Result<(), Error> {
+    let mut stderr = io::stderr();
+    warn_if_locked_ignored(common, &mut stderr);
+
     let check_args = pipeline::CheckArgs {
         metadata: common.metadata_options(),
         config_path: common.config.clone(),
     };
-    let mut stderr = io::stderr();
-    let outcome = pipeline::check(&check_args, &mut stderr)?;
+    let mut outcome = pipeline::check(&check_args, &mut stderr)?;
 
-    let mut stdout = io::stdout();
-    render_plain_report(&outcome, &mut stdout);
+    let mut stdout = anstream::stdout();
+    let context = RenderContext {
+        workspace_root: outcome.workspace_root.clone(),
+        tool: "cargo-depgate",
+        version: env!("CARGO_PKG_VERSION"),
+        color: stdout.current_choice() != anstream::ColorChoice::Never,
+    };
+    let started = Instant::now();
+    let render_result =
+        report::render(resolve_format(common.format), &outcome, &context, &mut stdout);
+    outcome.timings.add(crate::timings::Phase::Report, started.elapsed());
+    outcome.timings.finish();
     if common.timings {
+        // The diagnostic stream is deliberately best effort: the public error contract has no
+        // diagnostic-stream I/O variant, unlike the primary report output below.
         drop(outcome.timings.write_to(&outcome.counters, &mut stderr));
     }
+    write_report_result(render_result)?;
 
     if outcome.exit == 0 {
         Ok(())
     } else {
         Err(Error::PolicyViolations { count: outcome.counters.violations as usize })
     }
+}
+
+fn run_explain(explain: &ExplainArgs) -> Result<(), Error> {
+    let mut stderr = io::stderr();
+    warn_if_locked_ignored(&explain.common, &mut stderr);
+
+    let args = pipeline::ExplainArgs {
+        metadata: explain.common.metadata_options(),
+        config_path: explain.common.config.clone(),
+        package: explain.package.clone(),
+        dependency: explain.dependency.clone(),
+    };
+    let outcome = pipeline::explain(&args)?;
+    let format = resolve_format(explain.common.format);
+    let mut stdout = anstream::stdout();
+
+    let write_result = match format {
+        report::Format::Json => {
+            #[derive(serde::Serialize)]
+            struct ExplainHop {
+                name: String,
+                version: String,
+                target: Option<String>,
+                optional: bool,
+            }
+
+            #[derive(serde::Serialize)]
+            struct ExplainReport {
+                reachable: bool,
+                path: Vec<ExplainHop>,
+            }
+
+            let mut path = Vec::with_capacity(outcome.path.len() + usize::from(outcome.reachable));
+            if outcome.reachable {
+                path.push(ExplainHop {
+                    name: outcome.root.clone(),
+                    version: outcome.root_version.clone(),
+                    target: None,
+                    optional: false,
+                });
+                path.extend(outcome.path.iter().map(|hop| ExplainHop {
+                    name: hop.name.clone(),
+                    version: hop.version.clone(),
+                    target: hop.target.clone(),
+                    optional: hop.optional,
+                }));
+            }
+            let report = ExplainReport { reachable: outcome.reachable, path };
+            // `io::Error::from` preserves a `BrokenPipe` kind so `| head` stays a policy exit.
+            serde_json::to_writer_pretty(&mut stdout, &report)
+                .map_err(io::Error::from)
+                .and_then(|()| writeln!(stdout))
+        }
+        report::Format::Human | report::Format::Github => {
+            // GitHub annotations have no natural shape for reachability queries, so both formats
+            // intentionally use the same human-readable witness output.
+            if outcome.reachable {
+                let witness = report::human::render_witness(
+                    &outcome.root,
+                    Some(&outcome.root_version),
+                    &outcome.path,
+                    &[],
+                );
+                writeln!(stdout, "{witness}")
+            } else {
+                writeln!(stdout, "not reachable")
+            }
+        }
+    };
+
+    write_report_result(write_result)
 }
 
 fn run_schema() -> Result<(), Error> {
@@ -281,72 +354,64 @@ fn run_schema() -> Result<(), Error> {
             message: format!("failed to serialize configuration schema: {source}"),
             span: None,
         })?;
-    let mut stdout = io::stdout();
-    drop(writeln!(stdout, "{rendered}"));
-    Ok(())
+    let mut stdout = anstream::stdout();
+    write_report_result(writeln!(stdout, "{rendered}"))
 }
 
-fn render_plain_report(outcome: &pipeline::Outcome, out: &mut impl Write) {
-    let violations = outcome
-        .violations
-        .iter()
-        .map(|violation| (violation.rule_id.as_str(), violation))
-        .collect::<HashMap<_, _>>();
-
-    for status in &outcome.statuses {
-        if status.passed {
-            drop(writeln!(out, "ok {}", status.id));
-            continue;
+fn resolve_format(explicit: Option<ReportFormat>) -> ReportFormat {
+    explicit.unwrap_or_else(|| {
+        if std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true") {
+            ReportFormat::Github
+        } else {
+            ReportFormat::Human
         }
+    })
+}
 
-        if status.kind == manifest::RULE_KIND {
-            for entry in outcome.manifest.iter().flat_map(|report| &report.entries) {
-                drop(writeln!(
-                    out,
-                    "FAIL {}: {}:{}:{} {} {} = {:?}",
-                    status.id,
-                    display_path(&entry.span.file, &outcome.workspace_root),
-                    entry.span.line,
-                    entry.span.col,
-                    entry.table,
-                    entry.dependency,
-                    entry.version
-                ));
-            }
-            continue;
-        }
-
-        let violation = violations.get(status.id.as_str()).copied();
-        match (status.kind, violation) {
-            ("internal" | "leaf" | "direct", Some(violation)) => drop(writeln!(
-                out,
-                "FAIL {}: {} match(es), +{} extra, -{} missing",
-                status.id,
-                status.matched,
-                violation.extra.len(),
-                violation.missing.len()
-            )),
-            ("sealed", Some(violation)) => drop(writeln!(
-                out,
-                "FAIL {}: consumed by {} member(s)",
-                status.id,
-                violation.sealed_by.len()
-            )),
-            _ => drop(writeln!(out, "FAIL {}: {} match(es)", status.id, status.matched)),
-        }
+/// Converts a write result into the CLI error contract.
+///
+/// A broken pipe (e.g. the reader end of a `| head` pipeline closing early) is treated as
+/// intentional and swallowed: the caller falls through to its ordinary success/failure outcome
+/// instead of reporting a spurious write failure. Any other I/O error becomes
+/// [`Error::ReportWrite`] (exit code 4), so a truncated report from a genuine write failure is
+/// never mistaken for a passing or failing policy result.
+fn write_report_result(result: io::Result<()>) -> Result<(), Error> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(source) => Err(Error::ReportWrite { source }),
     }
-
-    let verdict = if outcome.counters.violations == 0 { "ok" } else { "FAIL" };
-    drop(writeln!(
-        out,
-        "{verdict}: {} rules, {} violations",
-        outcome.counters.rules, outcome.counters.violations
-    ));
 }
 
-/// Renders `path` relative to `root` when it lies beneath it, else unchanged.
-fn display_path<'a>(path: &'a Path, root: &Path) -> std::path::Display<'a> {
-    path.strip_prefix(root).unwrap_or(path).display()
+fn warn_if_locked_ignored(common: &CommonArgs, stderr: &mut impl Write) {
+    if common.metadata_json.is_some() && (common.locked_flag || common.no_locked) {
+        let _ = writeln!(
+            stderr,
+            "warning: --locked is ignored under --metadata-json; the JSON may predate Cargo.lock"
+        );
+    }
+}
+
+/// Renders a configuration error for the binary entry point.
+///
+/// Readable source spans use the human reporter's annotate-snippets diagnostic. If the span is
+/// absent or its source cannot be reconstructed, the output falls back to a single `error:` line.
+///
+/// # Errors
+///
+/// Returns an I/O error when writing the diagnostic to `out` fails.
+pub fn render_configuration_error(
+    message: &str,
+    span: Option<&crate::config::Span>,
+    color: bool,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    if let Some(span) = span
+        && let Some(rendered) = report::human::render_config_snippet(message, span, color)
+    {
+        return writeln!(out, "{rendered}");
+    }
+    writeln!(out, "error: {message}")
 }
 
 #[cfg(test)]

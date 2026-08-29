@@ -1,0 +1,5 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stdout(&output)
+---
+core v0.1.0 → ui v0.1.0

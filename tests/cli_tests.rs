@@ -4,7 +4,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Output,
+    process::{Command, Output},
 };
 
 use assert_cmd::cargo::cargo_bin_cmd;
@@ -76,6 +76,11 @@ fn strip_cargo_status_lines(stderr: &[u8]) -> Vec<u8> {
     kept.into_bytes()
 }
 
+fn normalize_config_path(stderr: &[u8], path: &Path) -> String {
+    let cleaned = strip_cargo_status_lines(stderr);
+    String::from_utf8_lossy(&cleaned).replace(&path.display().to_string(), "<config>")
+}
+
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -84,21 +89,88 @@ fn basic_fixture_root() -> PathBuf {
     repository_root().join("tests/fixtures/ws-basic")
 }
 
+fn violations_fixture_root() -> PathBuf {
+    repository_root().join("tests/fixtures/ws-violations")
+}
+
 fn config_error_fixture_root() -> PathBuf {
     repository_root().join("tests/fixtures/ws-config-errors")
 }
 
 /// Runs `check` on a path-only fixture with its own `depgate.toml`, offline.
 fn fixture_check(fixture: &Path) -> Output {
+    fixture_check_with_options(fixture, &[], false)
+}
+
+fn fixture_check_with_options(fixture: &Path, options: &[&str], github_actions: bool) -> Output {
+    let manifest = fixture.join("Cargo.toml");
+    let config = fixture.join("depgate.toml");
+    check_with_manifest_and_config(Some(&manifest), &config, options, github_actions)
+}
+
+fn fixture_explain(fixture: &Path, package: &str, dependency: &str) -> Output {
+    let manifest = fixture.join("Cargo.toml");
+    let config = fixture.join("depgate.toml");
     depgate()
-        .args(["check", "--manifest-path"])
-        .arg(fixture.join("Cargo.toml"))
+        .args(["explain", package, dependency, "--manifest-path"])
+        .arg(manifest)
         .arg("--config")
-        .arg(fixture.join("depgate.toml"))
+        .arg(config)
         .arg("--offline")
         .output()
-        .expect("cargo-depgate should execute the fixture check")
+        .expect("cargo-depgate should execute the fixture explain")
 }
+
+fn check_with_manifest_and_config(
+    manifest: Option<&Path>,
+    config: &Path,
+    options: &[&str],
+    github_actions: bool,
+) -> Output {
+    let mut command = depgate();
+    command.env_remove("GITHUB_ACTIONS").args(["check"]);
+    if let Some(manifest) = manifest {
+        command.args(["--manifest-path"]).arg(manifest);
+    }
+    command.arg("--config").arg(config).args(options);
+    if manifest.is_some() {
+        command.arg("--offline");
+    }
+    if github_actions {
+        command.env("GITHUB_ACTIONS", "true");
+    }
+    command.output().expect("cargo-depgate should execute the fixture check")
+}
+
+fn config_error_check(fixture_name: &str) -> Output {
+    let config = config_error_fixture_root().join(format!("{fixture_name}.toml"));
+    let phase_a = matches!(
+        fixture_name,
+        "bad-glob" | "leaf-and-internal" | "self-reference" | "unknown-key" | "zero-rules"
+    );
+    if phase_a {
+        let mut command = depgate();
+        command.args(["check", "--config"]).arg(config).env("CARGO", fail_cargo_path());
+        command.output().expect("cargo-depgate should execute the configuration check")
+    } else {
+        let manifest = basic_fixture_root().join("Cargo.toml");
+        check_with_manifest_and_config(Some(&manifest), &config, &[], false)
+    }
+}
+
+fn cleaned_stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn cleaned_stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&strip_cargo_status_lines(&output.stderr)).into_owned()
+}
+
+const SNAPSHOT_ROOT_FILTER: (&str, &str) = (r"/(?:[^/\s\n:]+/)*cargo-depgate", "<ROOT>");
+const SNAPSHOT_TIMINGS_FILTER: (&str, &str) = (
+    r#"("(?:read|parse|graph|traversals|evaluate|manifest|report|total)": )-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"#,
+    r#"$1"<MS>""#,
+);
 
 fn fail_cargo_path() -> PathBuf {
     repository_root().join("tests/bin/fail-cargo")
@@ -195,11 +267,8 @@ fn version_uses_the_installed_binary_name() {
     );
 }
 
-/// P0 deliberately keeps both `check` invocation forms as identical parse-only stubs.
-///
-/// The expected exit code and stderr legitimately change when P1, P2, and P4 implement `check`.
 #[test]
-fn direct_and_cargo_plugin_check_stubs_are_identical() {
+fn direct_and_cargo_plugin_check_invocations_are_identical() {
     let direct = output(&["check"]);
     let cargo_plugin = output(&["depgate", "check"]);
 
@@ -271,6 +340,94 @@ fn timings_go_to_stderr_and_the_report_stays_on_stdout() {
     let expected: Vec<&str> = phases.iter().chain(counters.iter()).copied().collect();
     assert_eq!(labels, expected, "unexpected --timings stream: {stderr}");
     assert!(stderr.lines().any(|line| line == "rules\t8"), "rules counter missing: {stderr}");
+
+    // The `--timings` stream is the authoritative source for AC-P2: `report` must be a real
+    // measurement and `total` must include every phase (the JSON reporter keeps its own clock).
+    let value = |label: &str| -> f64 {
+        stderr
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{label}\t")))
+            .and_then(|ms| ms.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("missing or non-numeric `{label}` line in {stderr}"))
+    };
+    let report = value("report");
+    let total = value("total");
+    let phase_sum: f64 = phases.iter().filter(|p| **p != "total").map(|p| value(p)).sum();
+    assert!(report > 0.0, "report phase must be measured: {stderr}");
+    assert!(total + 1e-9 >= phase_sum, "total {total} < sum of phases {phase_sum}: {stderr}");
+}
+
+/// Spawns the binary with a piped stdout whose read end is closed before the child writes
+/// anything, so every stdout write hits `EPIPE` deterministically. A closed reader must never
+/// turn into exit 4: `check` keeps its policy result and `explain` keeps exit 0.
+fn exit_code_with_closed_stdout(arguments: &[String]) -> Option<i32> {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-depgate"))
+        .args(arguments)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_TERM_COLOR", "never")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("cargo-depgate should spawn");
+    drop(child.stdout.take());
+    child.wait().expect("cargo-depgate should exit").code()
+}
+
+fn violations_global_args() -> Vec<String> {
+    let fixture = repository_root().join("tests/fixtures/ws-violations");
+    vec![
+        "--manifest-path".to_owned(),
+        fixture.join("Cargo.toml").display().to_string(),
+        "--config".to_owned(),
+        fixture.join("depgate.toml").display().to_string(),
+        "--offline".to_owned(),
+    ]
+}
+
+#[test]
+fn a_closed_stdout_keeps_the_policy_exit_code_in_every_format() {
+    for format in ["human", "json", "github"] {
+        let mut arguments = vec!["check".to_owned()];
+        arguments.extend(violations_global_args());
+        arguments.extend(["--format".to_owned(), format.to_owned()]);
+        assert_eq!(
+            exit_code_with_closed_stdout(&arguments),
+            Some(1),
+            "check --format {format} must keep the policy exit code on a closed reader"
+        );
+    }
+    for format in ["human", "json"] {
+        let mut arguments = vec!["explain".to_owned(), "core".to_owned(), "ui".to_owned()];
+        arguments.extend(violations_global_args());
+        arguments.extend(["--format".to_owned(), format.to_owned()]);
+        assert_eq!(
+            exit_code_with_closed_stdout(&arguments),
+            Some(0),
+            "explain --format {format} must keep exit 0 on a closed reader"
+        );
+    }
+}
+
+#[test]
+fn json_timings_report_is_positive_and_total_is_self_consistent() {
+    let output =
+        fixture_check_with_options(&violations_fixture_root(), &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(1), "JSON violation check failed: {output:?}");
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("JSON report should be valid JSON");
+    let timings = document["timings"].as_object().expect("JSON report should contain timings");
+    let phase = |name: &str| timings[name].as_f64().expect("timing should be numeric");
+    let report = phase("report");
+    let total = phase("total");
+    let sum = ["read", "parse", "graph", "traversals", "evaluate", "manifest"]
+        .into_iter()
+        .map(phase)
+        .sum::<f64>()
+        + report;
+
+    assert!(report > 0.0, "report timing should include typed report construction: {report}");
+    assert!(total >= sum, "total={total} must cover phase sum={sum}");
 }
 
 #[test]
@@ -295,10 +452,8 @@ fn violations_are_reported_with_a_fail_prefix_and_exit_one() {
 
     assert_eq!(output.status.code(), Some(1), "a violation must exit 1: {output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.lines().any(|line| line.starts_with("FAIL rules.app.leaf:")),
-        "leaf violation line missing: {stdout}"
-    );
+    assert!(stdout.contains("rules.app.leaf"), "leaf violation id missing: {stdout}");
+    assert!(stdout.contains("2 extra, 0 missing"), "leaf violation details missing: {stdout}");
     assert!(stdout.lines().any(|line| line == "ok rules.tool.direct"), "{stdout}");
     assert_eq!(stdout.lines().last(), Some("FAIL: 2 rules, 1 violations"), "{stdout}");
 }
@@ -327,10 +482,25 @@ fn phase_a_configuration_errors_never_spawn_cargo() {
             Some(2),
             "phase-A fixture {fixture_name} returned unexpected output: {output:?}"
         );
-        assert!(
-            String::from_utf8_lossy(&output.stderr).starts_with("configuration error:"),
-            "phase-A fixture {fixture_name} did not report a configuration error: {output:?}"
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected_message = match fixture_name {
+            "unknown-key.toml" => "unknown field `mystery`",
+            "zero-rules.toml" => "depgate.toml declares no rules",
+            "leaf-and-internal.toml" => "rules.foo declares both leaf and internal",
+            "self-reference.toml" => "rules.foo.internal cannot contain the rule package itself",
+            "bad-glob.toml" => "error parsing glob 'a[b': unclosed character class",
+            _ => unreachable!("fixture list is exhaustive"),
+        };
+        let expected_location = match fixture_name {
+            "unknown-key.toml" => "unknown-key.toml:2:1",
+            "zero-rules.toml" => "zero-rules.toml:1:1",
+            "leaf-and-internal.toml" => "leaf-and-internal.toml:4:8",
+            "self-reference.toml" => "self-reference.toml:4:13",
+            "bad-glob.toml" => "bad-glob.toml:4:9",
+            _ => unreachable!("fixture list is exhaustive"),
+        };
+        assert!(stderr.contains(expected_message), "phase-A message missing: {output:?}");
+        assert!(stderr.contains(expected_location), "phase-A source location missing: {output:?}");
         assert!(!marker.exists(), "phase-A fixture {fixture_name} spawned cargo");
     }
 }
@@ -372,12 +542,13 @@ fn phase_b_non_member_error_matches_explicit_and_discovered_config() {
         "discovered bad-rule check did not fail: {discovered:?}"
     );
 
-    // Error::Configuration displays ConfigError.message only; its source Span path is not rendered,
-    // so the two locations produce byte-identical stderr without path normalization. Cargo may
-    // prepend lock-contention diagnostics when the full suite runs concurrently.
+    // Source-annotated diagnostics include each config's absolute path. The fixture intentionally
+    // uses different roots and basenames, so normalize only those known paths before comparing the
+    // otherwise identical diagnostics. Cargo may prepend lock-contention diagnostics when the full
+    // suite runs concurrently.
     assert_eq!(
-        strip_cargo_status_lines(&explicit.stderr),
-        strip_cargo_status_lines(&discovered.stderr)
+        normalize_config_path(&explicit.stderr, &fixture.join("depgate-bad-rule.toml")),
+        normalize_config_path(&discovered.stderr, &discovered_config)
     );
 }
 
@@ -427,16 +598,21 @@ fn manifest_fixture_reports_each_version_with_its_position_and_exits_one() {
 
     assert_eq!(output.status.code(), Some(1), "manifest violations must exit 1: {output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let manifest_lines: Vec<&str> =
-        stdout.lines().filter(|line| line.starts_with("FAIL manifest.versions-in-root:")).collect();
-    assert_eq!(
-        manifest_lines,
-        vec![
-            "FAIL manifest.versions-in-root: crates/app/Cargo.toml:7:36 dependencies foo = \"0.1.0\"",
-            "FAIL manifest.versions-in-root: crates/app/Cargo.toml:12:36 dev-dependencies bar = \"0.1.0\"",
-            "FAIL manifest.versions-in-root: crates/app/Cargo.toml:19:36 target.'cfg(unix)'.dependencies baz = \"0.1.0\"",
-        ],
-        "{stdout}"
+    assert!(stdout.contains("manifest.versions-in-root"), "manifest rule id missing: {stdout}");
+    assert!(stdout.contains("crates/app/Cargo.toml:7:36"), "foo source location missing: {stdout}");
+    assert!(stdout.contains("dependencies foo = \"0.1.0\""), "foo entry missing: {stdout}");
+    assert!(
+        stdout.contains("crates/app/Cargo.toml:12:36"),
+        "bar source location missing: {stdout}"
+    );
+    assert!(stdout.contains("dev-dependencies bar = \"0.1.0\""), "bar entry missing: {stdout}");
+    assert!(
+        stdout.contains("crates/app/Cargo.toml:19:36"),
+        "baz source location missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("target.'cfg(unix)'.dependencies baz = \"0.1.0\""),
+        "baz entry missing: {stdout}"
     );
     assert!(stdout.lines().any(|line| line == "ok rules.app.deny"), "{stdout}");
     assert_eq!(stdout.lines().last(), Some("FAIL: 2 rules, 1 violations"), "{stdout}");
@@ -448,14 +624,257 @@ fn root_package_fixture_flags_the_root_dependencies_but_never_the_workspace_tabl
 
     assert_eq!(output.status.code(), Some(1), "the root dependency must exit 1: {output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let manifest_lines: Vec<&str> =
-        stdout.lines().filter(|line| line.starts_with("FAIL manifest.versions-in-root:")).collect();
-    assert_eq!(
-        manifest_lines,
-        vec!["FAIL manifest.versions-in-root: Cargo.toml:15:36 dependencies y = \"0.1.0\""],
-        "{stdout}"
-    );
+    assert!(stdout.contains("manifest.versions-in-root"), "manifest rule id missing: {stdout}");
+    assert!(stdout.contains("Cargo.toml:15:36"), "root source location missing: {stdout}");
+    assert!(stdout.contains("dependencies y = \"0.1.0\""), "root entry missing: {stdout}");
     assert!(!stdout.contains(" x = "), "the workspace table must never be flagged: {stdout}");
     assert!(stdout.lines().any(|line| line == "ok rules.y.leaf"), "{stdout}");
     assert_eq!(stdout.lines().last(), Some("FAIL: 2 rules, 1 violations"), "{stdout}");
+}
+
+#[test]
+fn ws_basic_human_report_snapshot() {
+    let output = fixture_check_with_options(&basic_fixture_root(), &["--format", "human"], false);
+
+    assert_eq!(output.status.code(), Some(0), "basic human check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_basic_json_report_snapshot() {
+    let output = fixture_check_with_options(&basic_fixture_root(), &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(0), "basic JSON check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_basic_github_report_snapshot() {
+    let output = fixture_check_with_options(&basic_fixture_root(), &[], true);
+
+    assert_eq!(output.status.code(), Some(0), "basic GitHub check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_violations_human_report_snapshot() {
+    let output =
+        fixture_check_with_options(&violations_fixture_root(), &["--format", "human"], false);
+
+    assert_eq!(output.status.code(), Some(1), "violation human check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_violations_json_report_snapshot() {
+    let output =
+        fixture_check_with_options(&violations_fixture_root(), &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(1), "violation JSON check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_violations_github_report_snapshot() {
+    let output = fixture_check_with_options(&violations_fixture_root(), &[], true);
+
+    assert_eq!(output.status.code(), Some(1), "violation GitHub check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn config_error_bad_glob_snapshot() {
+    let output = config_error_check("bad-glob");
+
+    assert_eq!(output.status.code(), Some(2), "bad-glob check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
+}
+
+#[test]
+fn config_error_leaf_and_internal_snapshot() {
+    let output = config_error_check("leaf-and-internal");
+
+    assert_eq!(output.status.code(), Some(2), "leaf-and-internal check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
+}
+
+#[test]
+fn config_error_non_member_snapshot() {
+    let output = config_error_check("non-member");
+
+    assert_eq!(output.status.code(), Some(2), "non-member check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
+}
+
+#[test]
+fn config_error_self_reference_snapshot() {
+    let output = config_error_check("self-reference");
+
+    assert_eq!(output.status.code(), Some(2), "self-reference check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
+}
+
+#[test]
+fn config_error_unknown_direct_snapshot() {
+    let output = config_error_check("unknown-direct");
+
+    assert_eq!(output.status.code(), Some(2), "unknown-direct check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
+}
+
+#[test]
+fn config_error_unknown_key_snapshot() {
+    let output = config_error_check("unknown-key");
+
+    assert_eq!(output.status.code(), Some(2), "unknown-key check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
+}
+
+#[test]
+fn config_error_zero_rules_snapshot() {
+    let output = config_error_check("zero-rules");
+
+    assert_eq!(output.status.code(), Some(2), "zero-rules check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
+}
+
+#[test]
+fn schema_output_snapshot() {
+    let output = output(&["schema"]);
+
+    assert!(output.status.success(), "schema command failed: {output:?}");
+    assert!(output.stderr.is_empty(), "schema wrote to stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn explain_reachable_snapshot() {
+    let output = fixture_explain(&violations_fixture_root(), "core", "ui");
+
+    assert_eq!(output.status.code(), Some(0), "reachable explain failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn explain_not_reachable_snapshot() {
+    let output = fixture_explain(&violations_fixture_root(), "ui", "core");
+
+    assert_eq!(output.status.code(), Some(0), "not-reachable explain failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn explain_unknown_dependency_reports_a_usage_error() {
+    let output = fixture_explain(&violations_fixture_root(), "core", "nonexistent");
+
+    assert_eq!(output.status.code(), Some(2), "unknown explain dependency succeeded: {output:?}");
+    assert!(output.stdout.is_empty(), "unknown explain dependency wrote to stdout: {output:?}");
+    assert_eq!(
+        cleaned_stderr(&output),
+        "error: explain references unknown package `nonexistent`\n"
+    );
+}
+
+#[test]
+fn explain_accepts_metadata_json_and_workspace_root() {
+    let fixture = basic_fixture_root();
+    let temp = tempfile::tempdir().expect("temporary directory should be created");
+    let metadata_path = temp.path().join("metadata.json");
+    let metadata = Command::new("cargo")
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_TERM_COLOR", "never")
+        .args(["metadata", "--format-version", "1", "--offline", "--manifest-path"])
+        .arg(fixture.join("Cargo.toml"))
+        .output()
+        .expect("cargo metadata should execute");
+    assert!(
+        metadata.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    fs::write(&metadata_path, &metadata.stdout).expect("metadata JSON should be writable");
+
+    let output = depgate()
+        .args(["explain", "core", "util", "--metadata-json"])
+        .arg(&metadata_path)
+        .args(["--workspace-root"])
+        .arg(&fixture)
+        .arg("--config")
+        .arg(fixture.join("depgate.toml"))
+        .output()
+        .expect("cargo-depgate should execute metadata-backed explain");
+
+    assert_eq!(output.status.code(), Some(0), "metadata-backed explain failed: {output:?}");
+    assert_eq!(cleaned_stdout(&output), "core v0.1.0 → util v0.1.0\n");
 }

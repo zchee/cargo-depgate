@@ -1,0 +1,38 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stdout(&output)
+---
+error[rules.core.deny]: dependency policy violation
+ --> depgate.toml:7:8
+  |
+7 | deny = ["ui"]
+  |        ^^^^^^ 1 match(es)
+  core v0.1.0 → ui v0.1.0
+error[rules.core.internal]: dependency policy violation
+ --> depgate.toml:8:12
+  |
+8 | internal = []
+  |            ^^ 1 extra, 0 missing
+  +ui (via core v0.1.0 → ui v0.1.0)
+error[rules.core.direct]: dependency policy violation
+ --> depgate.toml:9:10
+  |
+9 | direct = ["tool"]
+  |          ^^^^^^^^ 1 extra, 1 missing
+  +ui (via core v0.1.0 → ui v0.1.0)
+  -tool
+error[rules.core.sealed]: dependency policy violation
+  --> depgate.toml:10:10
+   |
+10 | sealed = true
+   |          ^^^^ consumed by 1 member(s)
+  consumed by: tool (tool → core)
+error[rules.tool.leaf]: dependency policy violation
+  --> depgate.toml:13:8
+   |
+13 | leaf = true
+   |        ^^^^ 2 extra, 0 missing
+  +core (via tool v0.1.0 → core v0.1.0)
+  +ui (via tool v0.1.0 → core v0.1.0 → ui v0.1.0)
+ok rules.ui.leaf
+FAIL: 6 rules, 5 violations

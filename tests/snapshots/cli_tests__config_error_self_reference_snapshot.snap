@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: rules.foo.internal cannot contain the rule package itself (foo)
+ --> <ROOT>/tests/fixtures/ws-config-errors/self-reference.toml:4:13
+  |
+4 | internal = ["foo", "bar"]
+  |             ^^^^^^^^^^^^^ here

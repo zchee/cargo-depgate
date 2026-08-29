@@ -110,6 +110,19 @@ fn measure_records_elapsed_time_and_finish_sets_total() {
 }
 
 #[test]
+fn finish_is_idempotent_and_refreshes_total_from_wall_time() {
+    let mut timings = Timings::start();
+    timings.finish();
+    let first = timings.millis(Phase::Total);
+
+    std::thread::sleep(Duration::from_millis(2));
+    timings.finish();
+    let second = timings.millis(Phase::Total);
+
+    assert!(second >= first, "first={first}, second={second}");
+}
+
+#[test]
 fn counter_entries_follow_the_json_counters_order() {
     let labels: Vec<&str> = Counters::default().entries().iter().map(|(label, _)| *label).collect();
 

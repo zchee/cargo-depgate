@@ -1,0 +1,192 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stdout(&output)
+---
+{
+  "tool": "cargo-depgate",
+  "version": "0.1.0",
+  "features": "default",
+  "timings": {
+    "read": "<MS>",
+    "parse": "<MS>",
+    "graph": "<MS>",
+    "traversals": "<MS>",
+    "evaluate": "<MS>",
+    "manifest": "<MS>",
+    "report": "<MS>",
+    "total": "<MS>"
+  },
+  "counters": {
+    "packages": 3,
+    "members": 3,
+    "normal_edges": 2,
+    "names": 3,
+    "superset_extra_edges": 0,
+    "direct_optional_decls": 0,
+    "unrebased_path_deps": 0,
+    "rules": 6,
+    "violations": 5,
+    "matches": 6
+  },
+  "violations": [
+    {
+      "rule_id": "rules.core.deny",
+      "package": "core",
+      "kind": "deny",
+      "matches": [
+        {
+          "name": "ui",
+          "version": "0.1.0",
+          "witness": [
+            {
+              "name": "ui",
+              "version": "0.1.0",
+              "target": null,
+              "optional": false
+            }
+          ],
+          "other_versions": []
+        }
+      ],
+      "extra": [],
+      "missing": [],
+      "sealed_by": [],
+      "span": {
+        "file": "depgate.toml",
+        "line": 7,
+        "col": 8
+      }
+    },
+    {
+      "rule_id": "rules.core.internal",
+      "package": "core",
+      "kind": "internal",
+      "matches": [],
+      "extra": [
+        {
+          "name": "ui",
+          "version": "0.1.0",
+          "witness": [
+            {
+              "name": "ui",
+              "version": "0.1.0",
+              "target": null,
+              "optional": false
+            }
+          ],
+          "other_versions": []
+        }
+      ],
+      "missing": [],
+      "sealed_by": [],
+      "span": {
+        "file": "depgate.toml",
+        "line": 8,
+        "col": 12
+      }
+    },
+    {
+      "rule_id": "rules.core.direct",
+      "package": "core",
+      "kind": "direct",
+      "matches": [],
+      "extra": [
+        {
+          "name": "ui",
+          "version": "0.1.0",
+          "witness": [
+            {
+              "name": "ui",
+              "version": "0.1.0",
+              "target": null,
+              "optional": false
+            }
+          ],
+          "other_versions": []
+        }
+      ],
+      "missing": [
+        "tool"
+      ],
+      "sealed_by": [],
+      "span": {
+        "file": "depgate.toml",
+        "line": 9,
+        "col": 10
+      }
+    },
+    {
+      "rule_id": "rules.core.sealed",
+      "package": "core",
+      "kind": "sealed",
+      "matches": [],
+      "extra": [],
+      "missing": [],
+      "sealed_by": [
+        {
+          "member": "tool",
+          "witness": [
+            {
+              "name": "core",
+              "version": "0.1.0",
+              "target": null,
+              "optional": false
+            }
+          ]
+        }
+      ],
+      "span": {
+        "file": "depgate.toml",
+        "line": 10,
+        "col": 10
+      }
+    },
+    {
+      "rule_id": "rules.tool.leaf",
+      "package": "tool",
+      "kind": "leaf",
+      "matches": [],
+      "extra": [
+        {
+          "name": "core",
+          "version": "0.1.0",
+          "witness": [
+            {
+              "name": "core",
+              "version": "0.1.0",
+              "target": null,
+              "optional": false
+            }
+          ],
+          "other_versions": []
+        },
+        {
+          "name": "ui",
+          "version": "0.1.0",
+          "witness": [
+            {
+              "name": "core",
+              "version": "0.1.0",
+              "target": null,
+              "optional": false
+            },
+            {
+              "name": "ui",
+              "version": "0.1.0",
+              "target": null,
+              "optional": false
+            }
+          ],
+          "other_versions": []
+        }
+      ],
+      "missing": [],
+      "sealed_by": [],
+      "span": {
+        "file": "depgate.toml",
+        "line": 13,
+        "col": 8
+      }
+    }
+  ]
+}

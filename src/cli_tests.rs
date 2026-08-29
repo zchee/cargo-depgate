@@ -1,13 +1,14 @@
 #![expect(clippy::expect_used, reason = "test bodies assert directly")]
 
-use std::{path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use clap::error::ErrorKind;
 
 use super::*;
 use crate::{
-    config::Span,
-    manifest::{ManifestReport, ManifestViolation},
+    config::{FeatureSelection, Span},
+    manifest::{self, ManifestReport, ManifestViolation},
+    report::{self, RenderContext},
     rules::RuleStatus,
     timings::{Counters, Timings},
 };
@@ -23,6 +24,19 @@ fn common_args(args: &Args) -> &CommonArgs {
         Some(Command::Schema) => panic!("schema has no common arguments"),
         None => &args.check,
     }
+}
+
+fn render_human_report(outcome: &pipeline::Outcome) -> String {
+    let context = RenderContext {
+        workspace_root: outcome.workspace_root.clone(),
+        tool: "cargo-depgate",
+        version: "test",
+        color: false,
+    };
+    let mut out = Vec::new();
+    report::render(report::Format::Human, outcome, &context, &mut out)
+        .expect("the in-memory report should render");
+    String::from_utf8(out).expect("the report is UTF-8")
 }
 
 #[test]
@@ -158,17 +172,6 @@ fn help_uses_the_cargo_subcommand_name() {
 }
 
 #[test]
-fn explain_remains_its_named_stub_error() {
-    let args = parse(&["cargo-depgate", "explain", "package", "dependency"]);
-    let error = run(&args).expect_err("explain remains a P0 stub");
-
-    assert!(matches!(
-        error,
-        Error::NotYetImplemented { ref subcommand } if subcommand == "explain"
-    ));
-}
-
-#[test]
 fn schema_is_implemented() {
     let args = parse(&["cargo-depgate", "schema"]);
 
@@ -232,7 +235,7 @@ fn metadata_options_defaults_match_the_library_defaults_and_schema_has_none() {
 }
 
 #[test]
-fn plain_report_prints_one_line_per_manifest_entry_relative_to_the_workspace_root() {
+fn human_report_prints_manifest_entries_relative_to_the_workspace_root() {
     let workspace_root = PathBuf::from("/ws");
     let entry = |dependency: &str, table: &str, line: u32, col: u32| ManifestViolation {
         package: "app".to_owned(),
@@ -245,14 +248,14 @@ fn plain_report_prints_one_line_per_manifest_entry_relative_to_the_workspace_roo
         statuses: vec![
             RuleStatus {
                 id: "rules.app.deny".to_owned(),
-                package: "app".to_owned(),
+                package: Some("app".to_owned()),
                 kind: "deny",
                 passed: true,
                 matched: 0,
             },
             RuleStatus {
                 id: manifest::RULE_ID.to_owned(),
-                package: String::new(),
+                package: None,
                 kind: manifest::RULE_KIND,
                 passed: false,
                 matched: 2,
@@ -271,20 +274,20 @@ fn plain_report_prints_one_line_per_manifest_entry_relative_to_the_workspace_roo
         workspace_root,
         counters: Counters { rules: 2, violations: 1, ..Counters::default() },
         timings: Timings::start(),
+        member_versions: BTreeMap::from([("app".to_owned(), "0.1.0".to_owned())]),
+        features: FeatureSelection::Default,
         exit: 1,
     };
 
-    let mut out = Vec::new();
-    render_plain_report(&outcome, &mut out);
+    let rendered = render_human_report(&outcome);
 
-    let rendered = String::from_utf8(out).expect("the report is UTF-8");
-    assert_eq!(
-        rendered,
-        "ok rules.app.deny\n\
-         FAIL manifest.versions-in-root: crates/app/Cargo.toml:7:36 dependencies foo = \"0.1.0\"\n\
-         FAIL manifest.versions-in-root: crates/app/Cargo.toml:19:36 target.'cfg(unix)'.dependencies baz = \"0.1.0\"\n\
-         FAIL: 2 rules, 1 violations\n"
-    );
+    assert!(rendered.contains("ok rules.app.deny"));
+    assert!(rendered.contains("manifest.versions-in-root"));
+    assert!(rendered.contains("crates/app/Cargo.toml:7:36"));
+    assert!(rendered.contains("dependencies foo = \"0.1.0\""));
+    assert!(rendered.contains("crates/app/Cargo.toml:19:36"));
+    assert!(rendered.contains("target.'cfg(unix)'.dependencies baz = \"0.1.0\""));
+    assert!(rendered.ends_with("FAIL: 2 rules, 1 violations\n"));
 }
 
 #[test]
@@ -292,7 +295,7 @@ fn plain_report_marks_a_clean_manifest_rule_ok() {
     let outcome = pipeline::Outcome {
         statuses: vec![RuleStatus {
             id: manifest::RULE_ID.to_owned(),
-            package: String::new(),
+            package: None,
             kind: manifest::RULE_KIND,
             passed: true,
             matched: 0,
@@ -303,14 +306,12 @@ fn plain_report_marks_a_clean_manifest_rule_ok() {
         workspace_root: PathBuf::from("/ws"),
         counters: Counters { rules: 1, ..Counters::default() },
         timings: Timings::start(),
+        member_versions: BTreeMap::new(),
+        features: FeatureSelection::Default,
         exit: 0,
     };
 
-    let mut out = Vec::new();
-    render_plain_report(&outcome, &mut out);
+    let rendered = render_human_report(&outcome);
 
-    assert_eq!(
-        String::from_utf8(out).expect("the report is UTF-8"),
-        "ok manifest.versions-in-root\nok: 1 rules, 0 violations\n"
-    );
+    assert_eq!(rendered, "ok manifest.versions-in-root\nok: 1 rules, 0 violations\n");
 }

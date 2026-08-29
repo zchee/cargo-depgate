@@ -6,7 +6,9 @@ use std::{
 };
 
 use super::*;
-use crate::{cli::MetadataSource, error::Error, metadata::MetadataOptions};
+use crate::{
+    cli::MetadataSource, config::FeatureSelection, error::Error, metadata::MetadataOptions,
+};
 use tempfile::tempdir;
 
 fn metadata_json(root: &Path) -> String {
@@ -74,6 +76,27 @@ fn args(root: &Path, config_path: Option<PathBuf>) -> CheckArgs {
         },
         config_path,
     }
+}
+
+fn explain_args(root: &Path, config_path: PathBuf, package: &str, dependency: &str) -> ExplainArgs {
+    ExplainArgs {
+        metadata: MetadataOptions {
+            source: Some(MetadataSource::File(metadata_file(root))),
+            ..MetadataOptions::default()
+        },
+        config_path: Some(config_path),
+        package: package.to_owned(),
+        dependency: dependency.to_owned(),
+    }
+}
+
+fn explain_config(root: &Path) -> PathBuf {
+    let path = root.join("depgate.toml");
+    write(
+        &path,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.app]\ndirect = [\"dep\"]\n",
+    );
+    path
 }
 
 fn run_check(args: &CheckArgs) -> (Result<Outcome, Error>, String) {
@@ -205,7 +228,7 @@ fn manifest_rule_alone_is_one_rule_and_passes_on_a_clean_member() {
     assert_eq!(outcome.statuses.len(), 1);
     assert_eq!(outcome.statuses[0].id, "manifest.versions-in-root");
     assert_eq!(outcome.statuses[0].kind, "manifest");
-    assert_eq!(outcome.statuses[0].package, "");
+    assert_eq!(outcome.statuses[0].package, None);
     assert!(outcome.statuses[0].passed);
     assert_eq!(outcome.statuses[0].matched, 0);
     assert!(outcome.violations.is_empty());
@@ -304,6 +327,8 @@ fn passing_direct_rule_populates_counters_and_warning() {
         }
     );
     assert!(outcome.manifest.is_none(), "versions-in-root = false must skip the manifest rule");
+    assert_eq!(outcome.member_versions.get("app").map(String::as_str), Some("0.1.0"));
+    assert_eq!(outcome.features, FeatureSelection::Default);
     let warning = "warning: rules.app.direct: app declares optional dependency dep; sibling feature unification may add it to the resolved edge set\n";
     assert_eq!(outcome.warnings, vec![warning.trim_end().to_owned()]);
     assert_eq!(stderr, warning);
@@ -333,5 +358,67 @@ fn failing_deny_rule_returns_policy_outcome() {
     assert_eq!(outcome.counters.matches, 1);
     assert_eq!(outcome.counters.superset_extra_edges, 1);
     assert_eq!(outcome.counters.direct_optional_decls, 0);
+    // A deny rule performs a forward BFS, so traversal timing must be a finite
+    // measured value rather than the pipeline's former always-zero placeholder.
+    let traversals = outcome.timings.millis(Phase::Traversals);
+    assert!(
+        traversals.is_finite() && traversals > 0.0,
+        "unexpected traversal timing: {traversals}"
+    );
     assert!(stderr.is_empty());
+}
+
+#[test]
+fn explain_unknown_package_returns_configuration_error() {
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let config_path = explain_config(temp.path());
+    let result = explain(&explain_args(temp.path(), config_path, "missing", "dep"));
+
+    let error = result.expect_err("an unknown explain root must fail");
+    assert!(matches!(
+        &error,
+        Error::Configuration { message, span }
+            if message == "explain references unknown package `missing`" && span.is_none()
+    ));
+    assert_eq!(error.exit_code(), 2);
+}
+
+#[test]
+fn explain_unknown_dependency_returns_configuration_error() {
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let config_path = explain_config(temp.path());
+    let result = explain(&explain_args(temp.path(), config_path, "app", "missing"));
+
+    let error = result.expect_err("an unknown explain dependency must fail");
+    assert!(matches!(
+        &error,
+        Error::Configuration { message, span }
+            if message == "explain references unknown package `missing`" && span.is_none()
+    ));
+    assert_eq!(error.exit_code(), 2);
+}
+
+#[test]
+fn explain_returns_a_root_to_dependency_witness_when_reachable() {
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let config_path = explain_config(temp.path());
+    let outcome = explain(&explain_args(temp.path(), config_path, "app", "dep"))
+        .expect("the dependency should be reachable");
+
+    assert!(outcome.reachable);
+    assert_eq!(outcome.root, "app");
+    assert_eq!(outcome.root_version, "0.1.0");
+    assert_eq!(outcome.dependency, "dep");
+    assert_eq!(outcome.path.last().map(|hop| hop.name.as_str()), Some("dep"));
+}
+
+#[test]
+fn explain_returns_an_empty_path_when_dependency_is_not_reachable() {
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let config_path = explain_config(temp.path());
+    let outcome = explain(&explain_args(temp.path(), config_path, "dep", "app"))
+        .expect("an unreachable dependency is a successful query");
+
+    assert!(!outcome.reachable);
+    assert!(outcome.path.is_empty());
 }
