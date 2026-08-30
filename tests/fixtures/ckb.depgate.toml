@@ -1,0 +1,32 @@
+# Migration policy for nervosnetwork/ckb@17d7db5, distilled from
+# `devtools/ci/check-cargotoml.sh` L45-104 (`check_version`), reached from
+# `Makefile` L226-227 (`make check-cargotoml`) and the three
+# `.github/workflows/ci_quick_checks_*.yaml` jobs that run it.
+#
+# ckb's root `Cargo.toml` carries a 194-entry `[workspace.dependencies]` table
+# at L122-321 and its members consume it with `workspace = true`, which is what
+# `[manifest] versions-in-root` asks for.
+#
+# Two caveats are recorded rather than smoothed over:
+#
+# 1. `check_version` is commented out of `main()` at L148 of that script, so
+#    ckb does not currently enforce any version-inheritance rule in CI.
+# 2. Where it does run, `check_version` asks a narrower question than this
+#    rule: it asserts each member's own `package.version` inherits from the
+#    workspace, and that intra-workspace dependency versions equal the
+#    workspace version. `versions-in-root` asks whether any member dependency
+#    entry names a version at all.
+#
+# This rule FIRES at the pinned commit with 24 findings, and the fixture
+# records them. They are real: 19 sit in member `target.'cfg(...)'.dependencies`
+# tables that were never migrated to workspace inheritance (`web-time`,
+# `blake2b-rs`, `tokio`, `nix`, `jemalloc-sys`, ...), 3 are the root package's
+# own target-gated `winreg`, `version-compare` and `tikv-jemallocator`, and 2
+# are plain `[dependencies]` entries: `phf = "= 0.8.0"` in `resource/Cargo.toml`
+# and `axum-streams 0.21` in `rpc/Cargo.toml`. ckb's disabled check would not
+# have caught them, and its enabled checks do not look at dependency versions
+# at all.
+schema = 1
+
+[manifest]
+versions-in-root = true

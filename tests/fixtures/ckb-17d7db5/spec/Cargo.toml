@@ -1,0 +1,35 @@
+[package]
+name = "ckb-chain-spec"
+version = "1.1.2"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "The Chain Specification"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
+ckb-constant.workspace = true
+ckb-types.workspace = true
+ckb-pow.workspace = true
+ckb-resource.workspace = true
+ckb-jsonrpc-types.workspace = true
+ckb-dao-utils.workspace = true
+ckb-rational.workspace = true
+ckb-crypto.workspace = true
+ckb-hash.workspace = true
+ckb-error.workspace = true
+ckb-traits.workspace = true
+ckb-logger.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+cacache = { version = "13.0.0", default-features = false, features = [
+  "tokio-runtime",
+  "mmap",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true

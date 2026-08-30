@@ -1,0 +1,17 @@
+[package]
+name = "ckb-fee-estimator"
+version = "1.1.2"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB's built-in fee estimator, which shares data with the ckb node through the tx-pool service"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-logger.workspace = true
+ckb-types.workspace = true
+ckb-util.workspace = true
+ckb-chain-spec.workspace = true
+thiserror.workspace = true

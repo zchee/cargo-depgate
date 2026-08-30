@@ -1,0 +1,30 @@
+[package]
+name = "ckb-resource"
+version = "1.2.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+build = "build.rs"
+description = "Bundles resources in the ckb binary"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+phf = "= 0.8.0" # ckb-resource's build script need this, and cargo shear think ckb don't need this
+includedir.workspace = true
+serde = { workspace = true, features = ["derive"] }
+ckb-types.workspace = true
+ckb-system-scripts.workspace = true
+
+[build-dependencies]
+includedir_codegen.workspace = true
+walkdir.workspace = true
+ckb-types.workspace = true
+ckb-system-scripts.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[package.metadata.cargo-shear]
+ignored = ["phf"]

@@ -1,0 +1,42 @@
+[package]
+name = "ckb-app-config"
+version = "1.3.0"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+license = "MIT"
+description = "CKB command line arguments and config options"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml.workspace = true
+path-clean.workspace = true
+num_cpus.workspace = true
+
+ckb-logger.workspace = true
+ckb-logger-config.workspace = true
+ckb-metrics-config.workspace = true
+ckb-verification-traits.workspace = true
+ckb-chain-spec.workspace = true
+ckb-jsonrpc-types.workspace = true
+ckb-pow.workspace = true
+ckb-resource.workspace = true
+ckb-build-info.workspace = true
+ckb-types.workspace = true
+secio.workspace = true
+multiaddr.workspace = true
+rand.workspace = true
+sentry = { workspace = true, optional = true }
+ckb-systemtime.workspace = true
+url = { workspace = true, features = ["serde"] }
+ubyte = { workspace = true, features = ["serde"] }
+
+[features]
+with_sentry = ["sentry"]
+
+[dev-dependencies]
+tempfile.workspace = true
+ckb-systemtime = { workspace = true, features = ["enable_faketime"] }

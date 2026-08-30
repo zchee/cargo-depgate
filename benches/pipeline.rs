@@ -29,16 +29,32 @@ use cargo_depgate::{
 use divan::{Bencher, black_box, counter::BytesCount};
 use flate2::read::GzDecoder;
 
+// The real-fixture benchmarks run on lemmy, the largest of the three committed examples
+// (3,526,964 decompressed bytes against ckb's 3,367,042 and coreutils' 2,026,143), so the
+// parse-rate and pipeline numbers describe the worst case the gate actually ships with.
 const REAL_GZIP_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ganja-code-153bfb1/metadata.json.gz");
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lemmy-439734d/metadata.json.gz");
 const REAL_FIXTURE_ROOT: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ganja-code-153bfb1");
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lemmy-439734d");
 const REAL_CONFIG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ganja-code.depgate.toml");
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lemmy.depgate.toml");
 
+/// The pinned shape of the lemmy fixture at `439734d`, asserted once so a fixture swap
+/// cannot silently move the real-fixture numbers.
+const REAL_JSON_BYTES: usize = 3_526_964;
+const REAL_PACKAGES: u32 = 707;
+const REAL_MEMBERS: usize = 41;
+
+// The SYNTHETIC_* ratios below are deliberately fixed constants of the generator, not a
+// description of any committed fixture. They were calibrated once against a 585-package /
+// 1,586-edge / 529-name real workspace that this repository no longer ships, and they are kept
+// verbatim so the scaling curve -- and the AC-P* bounds derived from it -- stay comparable
+// across a fixture swap. They are not lemmy's statistics: lemmy resolves 707 packages onto 603
+// names, 70 of them at two or more versions. Nothing reads them except the generator; the
+// real-fixture benchmarks above measure the fixture itself.
 const SYNTHETIC_PACKAGE_BYTES: usize = 4_146;
 const SYNTHETIC_NORMAL_EDGES_PER_PACKAGE: usize = 5;
-/// `targets[]` entries per synthetic package; the fixture averages 5.08.
+/// `targets[]` entries per synthetic package: 5.08 in the calibration workspace, rounded down.
 const SYNTHETIC_TARGETS_PER_PACKAGE: usize = 5;
 const SYNTHETIC_ROOTS_AT_MAX: usize = 24;
 const SYNTHETIC_MAX_PACKAGES: usize = 20_000;
@@ -71,6 +87,18 @@ impl BenchProfile {
         match self {
             Self::Dev => 0.8,
             Self::Ci => 0.4,
+        }
+    }
+
+    /// The floor the *real* fixture's parse must clear. Real `cargo metadata` documents
+    /// are denser than the synthetic generator's output -- far more short strings per
+    /// byte -- so the synthetic `parse_gbps` bound does not transfer unexamined.
+    /// Measured at 1.188 GB/s on the lemmy fixture (aarch64-apple-darwin, release);
+    /// the floor is set at half that, and the ci floor halves it again.
+    const fn real_parse_gbps(self) -> f64 {
+        match self {
+            Self::Dev => 0.6,
+            Self::Ci => 0.3,
         }
     }
 
@@ -172,6 +200,8 @@ static SYNTHETIC_5K_RENDER_CONTEXT: LazyLock<RenderContext> =
 static SYNTHETIC_20K_RENDER_CONTEXT: LazyLock<RenderContext> =
     LazyLock::new(|| synthetic_render_context(&SYNTHETIC_20K_PIPELINE_TEMP));
 
+static REAL_VALIDATED: OnceLock<()> = OnceLock::new();
+static REAL_PARSE_RATE_PRINTED: OnceLock<()> = OnceLock::new();
 static SYNTHETIC_20K_VALIDATED: OnceLock<()> = OnceLock::new();
 static PARSE_RATES: LazyLock<Mutex<[Option<f64>; 3]>> =
     LazyLock::new(|| Mutex::new([None, None, None]));
@@ -180,10 +210,28 @@ static OWN_WORK_PRINTED: OnceLock<()> = OnceLock::new();
 
 #[divan::bench(sample_count = 5, sample_size = 1)]
 fn real_parse(bencher: Bencher) {
+    ensure_real_fixture_validated();
     let bytes = REAL_BUFFER.as_bytes();
-    bencher
-        .counter(BytesCount::new(bytes.len()))
-        .bench(|| serde_json::from_slice::<Meta<'static>>(bytes).expect("parse hermetic metadata"));
+    let mut samples = Vec::with_capacity(5);
+    bencher.counter(BytesCount::new(bytes.len())).bench_local(|| {
+        let started = Instant::now();
+        black_box(serde_json::from_slice::<Meta<'static>>(bytes).expect("parse hermetic metadata"));
+        samples.push(started.elapsed());
+    });
+    let elapsed = median_duration(&mut samples);
+    let rate = bytes.len() as f64 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE) / 1e9;
+    let floor = PROFILE.real_parse_gbps();
+    if REAL_PARSE_RATE_PRINTED.set(()).is_ok() {
+        eprintln!(
+            "achieved real-fixture parse GB/s ({} profile): {rate:.3} (floor {floor:.3})",
+            PROFILE.label()
+        );
+    }
+    assert!(
+        rate >= floor,
+        "real-fixture parse rate {rate:.3} GB/s below the {} floor {floor:.3} GB/s",
+        PROFILE.label()
+    );
 }
 
 #[divan::bench(sample_count = 5, sample_size = 1)]
@@ -397,6 +445,23 @@ fn record_parse_rate(index: usize, rate: f64) {
     if PARSE_RATES_PRINTED.set(()).is_ok() {
         eprintln!("achieved parse GB/s at 1k, 5k, 20k: {one_k:.3}, {five_k:.3}, {twenty_k:.3}");
     }
+}
+
+fn ensure_real_fixture_validated() {
+    REAL_VALIDATED.get_or_init(|| {
+        let bytes = REAL_BUFFER.as_bytes();
+        let graph = &*REAL_GRAPH;
+        assert_eq!(bytes.len(), REAL_JSON_BYTES, "lemmy fixture JSON size drifted");
+        assert_eq!(graph.node_count(), REAL_PACKAGES, "lemmy fixture package count drifted");
+        assert_eq!(graph.members().len(), REAL_MEMBERS, "lemmy fixture member count drifted");
+        eprintln!(
+            "real fixture shape: bytes={}, packages={}, members={}, names={}",
+            bytes.len(),
+            graph.node_count(),
+            graph.members().len(),
+            graph.name_count()
+        );
+    });
 }
 
 fn ensure_synthetic_20k_validated() {

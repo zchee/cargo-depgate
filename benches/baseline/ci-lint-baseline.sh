@@ -1,38 +1,35 @@
 #!/usr/bin/env bash
-# Captured from .omc/research/probes/ci-lint-baseline.sh on 2026-08-29 as the AC-P4 ci-lint-baseline replica (3.728 s measured on aarch64-apple-darwin, cargo 1.100.0-nightly, per the plan).
-# Exact replica of ganja-code ci.yaml L181-355 dependency steps (read-only, offline).
+# AC-P4 baseline: a replica of the shell-and-`cargo tree` dependency policy that
+# LemmyNet/lemmy runs in CI, measured against the same pinned checkout the gate is
+# measured against so the speedup divides one workspace by itself.
+#
+# Source: `.woodpecker.yml` at 439734d, the `check_disallowed_dependencies` step,
+# L201-204. All four assertions are reproduced verbatim, including L204, which is a
+# positive one -- `extism` must stay reachable under `--all-features`.
+#
+# Read-only and offline: `cargo tree` resolves and prints, it never compiles. The
+# `--all-features` line does need every optional crate present in the local registry
+# cache, so warm it once with `cargo fetch --locked` in the checkout before measuring;
+# offline resolution then costs nothing beyond the read.
+#
+# scripts/perf.sh exports DEPGATE_PERF_WORKSPACE before invoking this, so AC-P4 never
+# divides one workspace's shell replica by another workspace's tool run.
 set -euo pipefail
-# Same workspace-resolution chain as scripts/perf.sh, which exports the resolved
-# value before invoking this replica: AC-P4 divides one workspace's shell replica
-# by the same workspace's tool run, never two different trees.
-workspace="${DEPGATE_PERF_WORKSPACE:-${DEPGATE_E2E_WORKSPACE:-$HOME/rust/src/github.com/zchee/ganja-code}}"
+workspace="${DEPGATE_PERF_WORKSPACE:-}"
 readonly workspace
+if [[ -z "$workspace" ]]; then
+    printf 'error: DEPGATE_PERF_WORKSPACE must name the pinned lemmy checkout\n' >&2
+    exit 2
+fi
 printf 'ci-lint-baseline workspace: %s\n' "$workspace" >&2
 cd "$workspace"
-export CARGO_NET_OFFLINE=true
+# The checkout pins `channel = "1.95"` in rust-toolchain.toml, which would make the
+# first measurement pay for a toolchain install and then measure a different cargo
+# from the one the gate is measured with. Pin the repo's own toolchain instead: the
+# four assertions only resolve and print, so the answer does not depend on it.
+export CARGO_NET_OFFLINE=true RUSTFLAGS= RUSTUP_TOOLCHAIN="${DEPGATE_PERF_TOOLCHAIN:-1.98.0}"
 t() { cargo tree "$@"; }
-! t -p ganja-core -e normal | grep -q ratatui
-! t -p ganja-core -e normal | grep -q axum
-internal="$(t -p ganja-tool -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-tool$' | sort -u | tr '\n' ' ')"; test "$internal" = "ganja-permission "
-internal="$(t -p ganja-core -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-core$' | sort -u | tr '\n' ' ')"; test "$internal" = "ganja-permission ganja-protocol ganja-provider ganja-storage ganja-team ganja-tool "
-internal="$(t -p ganja-team -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-team$' | sort -u | tr '\n' ' ')"; test "$internal" = "ganja-protocol "
-internal="$(t -p ganja-provider -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-provider$' | sort -u | tr '\n' ' ')"; test "$internal" = "ganja-permission ganja-protocol ganja-tool "
-! t -p ganja-provider -e normal | grep -q ratatui
-! t -p ganja-provider -e normal | grep -q crossterm
-! t -p ganja-provider -e normal | grep -q arboard
-! t -p ganja-permission -e normal | tail -n +2 | grep -q ganja-
-! t -p ganja-protocol -e normal | tail -n +2 | grep -q ganja-
-internal="$(t -p ganja-storage -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-storage$' | sort -u | tr '\n' ' ')"; test "$internal" = "ganja-permission ganja-protocol "
-external="$(t -p ganja-protocol -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' ')"; test "$external" = "serde serde_json uuid "
-internal="$(t -p ganja-client -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-client$' | sort -u | tr '\n' ' ')"; test "$internal" = "ganja-protocol "
-internal="$(t -p ganja-teammate-local -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-teammate-local$' | sort -u | tr '\n' ' ')"; test "$internal" = "ganja-core ganja-permission ganja-protocol ganja-provider ganja-storage ganja-team ganja-tool "
-! t -p ganja-tui -e normal | grep -q axum
-! t -p ganja-serve -e normal | grep -q ratatui
-! t -p ganja-client -e normal | grep -q axum
-! t -p ganja-serve -e normal | grep -q ganja-teammate-local
-! t -p tmux -e normal | tail -n +2 | grep -q ganja-
-for m in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | grep -v '^tmux$'); do
-  if t -p "$m" -e normal --prefix none | awk '{print $1}' | grep -qx tmux; then echo "$m consumes tmux" >&2; exit 1; fi
-done
-external="$(t -p tmux -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' ')"; test "$external" = "futures thiserror tokio "
-awk 'FNR==1{sec=""} /^\[/{sec=$0} sec ~ /dependencies/ && /version[[:space:]]*=/ {print FILENAME ":" FNR ": " $0; bad=1} END{exit bad}' crates/*/Cargo.toml
+! t -p lemmy_api_common --no-default-features -i diesel
+! t -i aws-lc-sys
+! t -i extism
+t --all-features -i extism >/dev/null

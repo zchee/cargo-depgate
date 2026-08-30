@@ -11,6 +11,13 @@ A high-performance dependency policy enforcer and CI gatekeeper for Cargo worksp
 * **Deterministic Fail-Fast CI**: Emits structured diagnostics with precise exit codes tailored for GitHub Actions and automated workflows.
 * **Zero Compilation Overhead**: Evaluates the resolved `cargo metadata` graph directly without compiling source code.
 
+Concretely: the gate's own work after `cargo metadata` returns is ~4 ms on a 700-package workspace,
+so its cost is dominated by the single resolve it already needs. Replacing the four `cargo tree`
+invocations of lemmy's dependency-policy step — two of which the gate expresses directly — with one
+gate run measures 3.1x end to end (298.7 ms against 931.2 ms on `aarch64-apple-darwin`; the absolute
+numbers move with the host, the ratio holds), and the ceiling scales with how many invocations a
+policy replaces.
+
 ## Install and run
 
 ```sh
@@ -30,6 +37,12 @@ cargo depgate explain my-app openssl       # whether, and how, one package reach
 evaluates no rules. It therefore needs a `depgate.toml` at the workspace root, or an explicit
 `--config PATH`. In a workspace that has neither, it exits 2 with the same missing-configuration
 message `check` would print.
+
+It also resolves the package it starts from the way a rule root resolves: **workspace members
+first**, so `explain foo bar` and `[rules.foo] deny = ["bar"]` always ask about the same node. A
+name that is not a member but is carried by exactly one package resolves to that package; a name
+that is not a member and is resolved at several versions is refused with exit 2 naming those
+versions, rather than silently answering for one of them.
 
 Both invocation forms work: `cargo depgate …`, where Cargo passes `depgate` as `argv[1]` and the
 binary strips it, and `cargo-depgate …` run directly. `check` and `explain` share the same global
@@ -287,33 +300,27 @@ split on the tab.
 
 `cargo-depgate` walks the workspace-unified, all-platform resolve, while `cargo tree -p M -e normal`
 shows one member on one host with that member's own features. The difference is measured, not
-assumed. The rows below are [zchee/ganja-code@153bfb1](https://github.com/zchee/ganja-code/tree/153bfb1) 
-on host **`aarch64-apple-darwin`** (rustc 1.98.0, cargo 1.98.0); both columns count distinct reachable
-package names and exclude the member itself.
+assumed: `counters.superset_extra_edges` reports how many of the edges a run actually traversed are
+platform-conditional (every normal `dep_kinds` entry carries a non-null `target`) or leave a
+workspace member through a declaration marked `optional = true`.
 
-| member | `cargo tree` | depgate closure | `+extra` | extra internal |
-|---|---:|---:|---:|---:|
-| `ganja-protocol` | 15 | 35 | +20 | 0 |
-| `ganja-team` | 34 | 67 | +33 | 0 |
-| `ganja-storage` | 40 | 68 | +28 | 0 |
-| `ganja-client` | 108 | 169 | +61 | 0 |
-| `ganja-core` | 210 | 291 | +81 | 0 |
-| `tmux` | 25 | 30 | +5 | 0 |
+| example | packages / members | `superset_extra_edges` |
+|---|---:|---:|
+| [LemmyNet/lemmy@439734d](https://github.com/LemmyNet/lemmy/tree/439734d) | 707 / 41 | 311 |
+| [nervosnetwork/ckb@17d7db5](https://github.com/nervosnetwork/ckb/tree/17d7db5) | 714 / 75 | 0 |
+| [uutils/coreutils@6341084](https://github.com/uutils/coreutils/tree/6341084) | 498 / 114 | 329 |
 
-The extras come from two families only: platform-conditional edges such as the `windows-sys` and
-`wasm-bindgen` families, and optional dependencies that another workspace member unified on, such as
-`uuid → atomic`. No `cargo tree` name was ever missing from the closure, on any of the 14 members —
-a missing name would mean a lost edge, and the differential gate fails on one.
+Measured on host **`aarch64-apple-darwin`** (rustc 1.98.0, cargo 1.98.0) against the frozen fixtures
+in `tests/fixtures/`. ckb's 0 is a property of its policy rather than of its graph: the counter
+counts edges a run walked, and a manifest-only policy declares no graph rule, so it walks none.
 
-"Extra internal" is the column that decides whether an exact-set rule is at risk, and it is 0 for
-every member here, because no member of that workspace declares an optional normal dependency on
-another member, and no member→member edge in this fixture is optional or target-gated. That is a
-measured property of `ganja-code`, not a general rule: a member→member edge declared
-`optional = true` would be traversed, and `superset_extra_edges` exists to count exactly that class
-of edge. `counters.superset_extra_edges` reports how many
-platform-conditional or member-optional edges a given run actually traversed, so the exposure is
-visible per run rather than inferred. All 14 member rows, per host, and an independent cross-check
-against [guppy](https://crates.io/crates/guppy) live in [`docs/differential.md`](docs/differential.md).
+The extras come from two families and no others: platform-conditional edges, such as the
+`windows-sys` and `wasm-bindgen` families, and optional dependencies that a sibling member unified
+on. Both only ever *widen* the closure. Widening is safe for the containment rules — `deny`, `leaf`
+and `sealed` cannot lose a finding to it — and it is the measured risk for the equality rules
+`internal` and `direct`, which can report an `+extra` name that a host-rooted, package-rooted view
+would not have shown. [`docs/examples.md`](docs/examples.md) works three real policies through end
+to end, including the coreutils case where this widening is the whole story.
 
 <!-- depgate:exit-codes -->
 
@@ -325,7 +332,7 @@ Exit codes are 0 for success, 1 for policy violations, 2 for configuration or us
 |---:|---|
 | `0` | The policy passed. `explain` and `schema` also exit 0 on success, and `explain` exits 0 whether or not the dependency is reachable. |
 | `1` | At least one rule failed. `counters.violations` is the number of failed rules. |
-| `2` | Configuration or usage error: an invalid command line, or a `depgate.toml` that is missing, unparsable, of the wrong schema, empty of rules, self-contradictory, or naming a package that is not a workspace member or not in the graph. `explain` validates the same file on the same path, so a missing or invalid `depgate.toml` exits 2 there too, and `explain` on an unknown name exits 2 with the same message. |
+| `2` | Configuration or usage error: an invalid command line, or a `depgate.toml` that is missing, unparsable, of the wrong schema, empty of rules, self-contradictory, or naming a package that is not a workspace member or not in the graph. `explain` validates the same file on the same path, so a missing or invalid `depgate.toml` exits 2 there too, and `explain` on an unknown name exits 2 with the same message, as does `explain` on a name that is not a workspace member and is resolved at several versions. |
 | `3` | `cargo metadata` failed — it could not be spawned, exceeded `--cargo-timeout`, exited non-zero, or produced JSON that fails a fail-closed input check — or a member manifest could not be read or parsed, or the `--metadata-json` document could not be read. Nothing is ever silently skipped. |
 | `4` | The report, `explain` output, or schema could not be written. A broken pipe is excluded: piping into `head` keeps the policy exit code. |
 
@@ -387,17 +394,17 @@ overflow from the annotation list. The human report printed below the annotation
 truncated: it always carries every violation, so the annotations are a navigation aid and the report
 is the record.
 
-[`docs/migration/ganja-code.md`](docs/migration/ganja-code.md) is a worked migration: 180 lines of
-`cargo tree | grep` steps replaced by one policy file and one gate invocation, with the rule-to-line
-mapping kept as the review baseline.
+[`docs/examples.md`](docs/examples.md) migrates three real projects' CI policies this way — two of
+lemmy's four `cargo tree` assertions among them — each with the upstream lines it replaces quoted
+next to the rule, so a reviewer can tell a deliberate policy change from an accidental one.
 
 <!-- depgate:version-blind -->
 
 ## Version-blind policies
 
-Rules operate on package **names**, not on `(name, version)` pairs. In the reference workspace, 585
-resolved packages project onto 529 distinct names, and 42 of those names are resolved at two or
-three versions at once. The consequences are worth stating plainly:
+Rules operate on package **names**, not on `(name, version)` pairs. In the lemmy fixture, 707
+resolved packages project onto 603 distinct names, and 70 of those names are resolved at two or more
+versions at once. The consequences are worth stating plainly:
 
 * `deny = ["syn"]` denies every resolved version of `syn`.
 * `internal` and `direct` compare name sets, so two versions of one name are one member of the set.

@@ -1,0 +1,21 @@
+[package]
+name = "ckb-crypto"
+version = "1.1.1"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB crypto util library"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-fixed-hash.workspace = true
+secp256k1 = { workspace = true, features = ["recovery"], optional = true }
+thiserror.workspace = true
+rand = { workspace = true, features = ["small_rng"] }
+faster-hex.workspace = true
+
+[features]
+default = ["secp"]
+secp = ["secp256k1"]

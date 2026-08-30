@@ -1,0 +1,28 @@
+[package]
+name = "ckb-instrument"
+version = "1.1.1"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "Instruments for ckb for working with `Export`, `Import`"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-types.workspace = true
+ckb-chain.workspace = true
+ckb-store.workspace = true
+ckb-shared.workspace = true
+ckb-channel.workspace = true
+ckb-jsonrpc-types.workspace = true
+ckb-verification-traits.workspace = true
+serde_json.workspace = true
+indicatif = { workspace = true, optional = true }
+rayon.workspace = true
+itertools.workspace = true
+ckb-app-config.workspace = true
+
+
+[features]
+progress_bar = ["indicatif"]

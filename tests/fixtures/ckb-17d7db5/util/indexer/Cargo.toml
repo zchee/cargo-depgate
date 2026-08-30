@@ -1,0 +1,28 @@
+[package]
+name = "ckb-indexer"
+version = "1.2.1"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB's built-in indexer, which shares data with the ckb node by creating secondary db instances"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ckb-types.workspace = true
+ckb-jsonrpc-types.workspace = true
+ckb-app-config.workspace = true
+ckb-notify.workspace = true
+ckb-async-runtime.workspace = true
+ckb-indexer-sync.workspace = true
+rocksdb = { workspace = true, features = ["snappy"], default-features = false }
+ckb-metrics.workspace = true
+memchr.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+rand.workspace = true
+faster-hex.workspace = true

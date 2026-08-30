@@ -192,14 +192,14 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
 /// graphed, and the discovered or preloaded file is validated again against that graph (Phase B).
 /// Although `explain` does not evaluate rules or scan manifests, this keeps configuration errors
 /// and the validated `[graph].features` selection consistent with `check` for identical flags.
-/// The first node returned for a package name is selected when multiple versions exist, matching
-/// the deterministic package order emitted by `cargo metadata`; version disambiguation is out of
-/// scope for this query.
+/// The queried package is resolved by `explain_root`, which mirrors the rule-root contract so
+/// that `explain` and `check` cannot answer opposite questions about the same name.
 ///
 /// # Errors
 ///
-/// Propagates configuration, metadata, and graph errors. Unknown package or dependency names are
-/// reported as [`Error::Configuration`] and therefore map to exit code 2.
+/// Propagates configuration, metadata, and graph errors. Unknown package or dependency names, and
+/// an ambiguous non-member package name, are reported as [`Error::Configuration`] and therefore map
+/// to exit code 2.
 pub fn explain(args: &ExplainArgs, stderr: &mut impl Write) -> Result<ExplainOutcome, Error> {
     let (preloaded, metadata_options) =
         preload_config(args.config_path.as_deref(), &args.metadata)?;
@@ -230,11 +230,7 @@ pub fn explain(args: &ExplainArgs, stderr: &mut impl Write) -> Result<ExplainOut
         message: config::unknown_package_message("explain", &args.package),
         span: None,
     })?;
-    let root =
-        graph.nodes_of_name(package_name).first().copied().ok_or_else(|| Error::Configuration {
-            message: config::unknown_package_message("explain", &args.package),
-            span: None,
-        })?;
+    let root = explain_root(&graph, &args.package, package_name)?;
     let dependency_name =
         graph.lookup_name(&args.dependency).ok_or_else(|| Error::Configuration {
             message: config::unknown_package_message("explain", &args.dependency),
@@ -269,6 +265,51 @@ pub fn explain(args: &ExplainArgs, stderr: &mut impl Write) -> Result<ExplainOut
         dependency: args.dependency.clone(),
         path: rules::witness_hops(&graph, &node_path),
     })
+}
+
+/// Resolves the node `explain` reaches from, mirroring the rule-root contract.
+///
+/// `check` resolves a rule root strictly among workspace members (`member_nodes` in
+/// `rules::evaluate`), so `explain` must resolve the same way: on a graph that carries one name
+/// at several versions, taking any other node makes the two commands answer opposite questions
+/// about the same `(package, dependency)` pair. The resolution order is:
+///
+/// 1. the first **workspace member** carrying `name`, in `workspace_members` order — exactly the
+///    node a `[rules.<name>]` root would bind to;
+/// 2. otherwise, when `name` is carried by exactly one node, that node;
+/// 3. otherwise the query is refused, because a non-member name resolved at several versions has
+///    no single answer and silently picking one would make the verdict depend on `cargo metadata`'s
+///    package order.
+///
+/// # Errors
+///
+/// Returns [`Error::Configuration`] (exit code 2) when `name` is carried by no node, or by several
+/// nodes none of which is a workspace member; the latter message names the candidate versions.
+fn explain_root(graph: &Graph<'_>, package: &str, name: u32) -> Result<u32, Error> {
+    if let Some(&member) = graph.members().iter().find(|&&node| graph.name_id(node) == name) {
+        return Ok(member);
+    }
+    match graph.nodes_of_name(name) {
+        [] => Err(Error::Configuration {
+            message: config::unknown_package_message("explain", package),
+            span: None,
+        }),
+        [only] => Ok(*only),
+        nodes => {
+            let mut versions: Vec<&str> = nodes.iter().map(|&node| graph.version(node)).collect();
+            versions.sort_unstable();
+            versions.dedup();
+            Err(Error::Configuration {
+                message: format!(
+                    "explain references `{package}`, which is not a workspace member and resolves \
+                     at {} versions: {}; explain resolves workspace members, so name one instead",
+                    nodes.len(),
+                    versions.join(", ")
+                ),
+                span: None,
+            })
+        }
+    }
 }
 
 /// The manifest rule as one more [`RuleStatus`]: it fails once, `matched` counts entries.

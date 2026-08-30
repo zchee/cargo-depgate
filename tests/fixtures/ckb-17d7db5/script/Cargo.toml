@@ -1,0 +1,51 @@
+[package]
+name = "ckb-script"
+version = "1.2.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+build = "build.rs"
+description = "CKB component to run the type/lock scripts"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[features]
+default = ["logging", "detect-asm"]
+
+asm = ["ckb-vm/asm"]
+detect-asm = ["ckb-vm/detect-asm"]
+logging = ["ckb-logger"]
+flatmemory = []
+
+[dependencies]
+ckb-traits.workspace = true
+byteorder.workspace = true
+ckb-types.workspace = true
+ckb-hash.workspace = true
+ckb-vm.workspace = true
+faster-hex.workspace = true
+ckb-logger = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+ckb-error.workspace = true
+ckb-chain-spec.workspace = true
+tokio = { workspace = true, features = ["sync", "macros"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio = { version = "1.35.0", features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+proptest.workspace = true
+ckb-db.workspace = true
+ckb-store.workspace = true
+ckb-test-chain-utils.workspace = true
+tiny-keccak = { workspace = true, features = ["sha3"] }
+ckb-crypto.workspace = true
+ckb-db-schema.workspace = true
+tempfile.workspace = true
+rand.workspace = true
+daggy.workspace = true
+molecule.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(has_asm)'] }

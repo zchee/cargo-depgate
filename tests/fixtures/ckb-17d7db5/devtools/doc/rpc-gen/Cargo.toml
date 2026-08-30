@@ -1,0 +1,24 @@
+[package]
+name = "ckb-rpc-gen"
+publish = false
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+description = "CKB RPC documentation generator"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-rpc ={ workspace = true }
+schemars.workspace = true
+serde_json.workspace = true
+tera.workspace = true
+syn = { workspace = true, features = ["extra-traits", "full", "parsing", "visit"] }
+walkdir.workspace = true
+proc-macro2.workspace = true
+
+[[bin]]
+name = "ckb-rpc-gen-patch"
+path = "src/bin/patch_openrpc.rs"

@@ -1,0 +1,344 @@
+[package]
+name = "ckb"
+version = "0.209.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+build = "build.rs"
+description = "CKB is the layer 1 of Nervos Network, a public/permissionless blockchain"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+default-run = "ckb"
+
+[package.metadata.binstall]
+bin-dir = "{ name }_v{ version }_{ target }/{ bin }{ binary-ext }"
+
+[[bin]]
+name = "ckb"
+path = "src/main.rs"
+
+[build-dependencies]
+ckb-build-info.workspace = true
+
+[dependencies]
+ckb-build-info.workspace = true
+ckb-bin.workspace = true
+console-subscriber = { workspace = true, optional = true }
+
+[target.'cfg(target_env = "msvc")'.dependencies]
+winreg = "0.55"
+version-compare = "0.2"
+
+[target.'cfg(all(not(target_env = "msvc"), not(target_os="macos")))'.dependencies]
+tikv-jemallocator = { version = "0.5.0", features = [
+  "unprefixed_malloc_on_supported_platforms",
+] }
+
+[dev-dependencies]
+
+[workspace]
+# To get a list sorted by dependencies, run devtools/ci/check-cyclic-dependencies.py
+members = [
+  "util",
+  "util/occupied-capacity/core",
+  "util/channel",
+  "util/systemtime",
+  "util/fixed-hash/core",
+  "util/build-info",
+  "util/logger",
+  "util/logger-config",
+  "util/metrics-config",
+  "util/hash",
+  "util/rational",
+  "benches",
+  "db-schema",
+  "util/spawn",
+  "util/occupied-capacity/macros",
+  "util/fixed-hash/macros",
+  "util/logger-service",
+  "util/runtime",
+  "util/stop-handler",
+  "util/onion",
+  "util/metrics",
+  "util/metrics-service",
+  "util/fixed-hash",
+  "util/occupied-capacity",
+  "util/crypto",
+  "util/constant",
+  "error",
+  "util/multisig",
+  "util/gen-types",
+  "util/migrate/migration-template",
+  "util/types",
+  "util/jsonrpc-types",
+  "freezer",
+  "resource",
+  "pow",
+  "util/dao/utils",
+  "traits",
+  "spec",
+  "util/fee-estimator",
+  "util/proposal-table",
+  "script",
+  "util/app-config",
+  "db",
+  "network",
+  "miner",
+  "notify",
+  "util/memory-tracker",
+  "db-migration",
+  "util/network-alert",
+  "store",
+  "util/indexer-sync",
+  "util/indexer",
+  "util/rich-indexer",
+  "util/chain-iter",
+  "util/dao",
+  "util/test-chain-utils",
+  "util/reward-calculator",
+  "util/snapshot",
+  "util/migrate",
+  "verification/traits",
+  "verification",
+  "verification/contextual",
+  "tx-pool",
+  "shared",
+  "block-filter",
+  "chain",
+  "sync",
+  "util/instrument",
+  "rpc",
+  "util/light-client-protocol-server",
+  "util/launcher",
+  "devtools/doc/rpc-gen",
+  "ckb-bin",
+  "test",
+]
+
+[workspace.metadata.cargo-shear]
+ignored = ["ckb-test"]
+
+[workspace.dependencies]
+tempfile = "3"
+itertools = "0.11.0"
+schemars = "1"
+anyhow = "1.0.34"
+arc-swap = "1.3"
+async-stream = "0.3.3"
+async-trait = "0.1"
+axum = "0.8"
+backtrace = "0.3"
+base64 = "0.21.0"
+bit-vec = "0.6.3"
+bitflags = "2.9"
+blake2b-ref = "0.3"
+bloom-filters = "0.1"
+bs58 = "0.5.0"
+byteorder = "1.3.1"
+bytes = "1.11.1"
+cfg-if = "1.0"
+ckb-app-config = { path = "util/app-config", version = "1" }
+ckb-async-runtime = { path = "util/runtime", version = "1" }
+ckb-bin = { path = "ckb-bin", version = "1" }
+ckb-block-filter = { path = "block-filter", version = "1" }
+ckb-build-info = { path = "util/build-info", version = "1" }
+ckb-chain = { path = "chain", version = "1" }
+ckb-chain-iter = { path = "util/chain-iter", version = "1" }
+ckb-chain-spec = { path = "spec", version = "1" }
+ckb-channel = { path = "util/channel", version = "1" }
+ckb-constant = { path = "util/constant", version = "1" }
+ckb-crypto = { path = "util/crypto", version = "1" }
+ckb-dao = { path = "util/dao", version = "1" }
+ckb-dao-utils = { path = "util/dao/utils", version = "1" }
+ckb-db = { path = "db", version = "1" }
+ckb-db-migration = { path = "db-migration", version = "1" }
+ckb-db-schema = { path = "db-schema", version = "1" }
+ckb-error = { path = "error", version = "1" }
+ckb-fee-estimator = { path = "util/fee-estimator", version = "1" }
+ckb-fixed-hash = { path = "util/fixed-hash", version = "1" }
+ckb-fixed-hash-core = { path = "util/fixed-hash/core", version = "1" }
+ckb-fixed-hash-macros = { path = "util/fixed-hash/macros", version = "1" }
+ckb-freezer = { path = "freezer", version = "1" }
+ckb-gen-types = { path = "util/gen-types", version = "1" }
+ckb-hash = { path = "util/hash", default-features = false, version = "1" }
+ckb-indexer = { path = "util/indexer", version = "1" }
+ckb-indexer-sync = { path = "util/indexer-sync", version = "1" }
+ckb-instrument = { path = "util/instrument", version = "1" }
+ckb-jsonrpc-types = { path = "util/jsonrpc-types", version = "1" }
+ckb-launcher = { path = "util/launcher", version = "1" }
+ckb-light-client-protocol-server = { path = "util/light-client-protocol-server", version = "1" }
+ckb-logger = { path = "util/logger", version = "1" }
+ckb-logger-config = { path = "util/logger-config", version = "1" }
+ckb-logger-service = { path = "util/logger-service", version = "1" }
+ckb-memory-tracker = { path = "util/memory-tracker", version = "1" }
+ckb-merkle-mountain-range = "0.5.2"
+ckb-metrics = { path = "util/metrics", version = "1" }
+ckb-metrics-config = { path = "util/metrics-config", version = "1" }
+ckb-metrics-service = { path = "util/metrics-service", version = "1" }
+ckb-migrate = { path = "util/migrate", version = "1" }
+ckb-migration-template = { path = "util/migrate/migration-template", version = "1" }
+ckb-miner = { path = "miner", version = "1" }
+ckb-multisig = { path = "util/multisig", version = "1" }
+ckb-network = { path = "network", version = "1" }
+ckb-network-alert = { path = "util/network-alert", version = "1" }
+ckb-notify = { path = "notify", version = "1" }
+ckb-occupied-capacity = { path = "util/occupied-capacity", version = "1" }
+ckb-occupied-capacity-core = { path = "util/occupied-capacity/core", version = "1" }
+ckb-occupied-capacity-macros = { path = "util/occupied-capacity/macros", version = "1" }
+ckb-onion = { path = "util/onion", version = "1" }
+ckb-pow = { path = "pow", version = "1" }
+ckb-proposal-table = { path = "util/proposal-table", version = "1" }
+ckb-rational = { path = "util/rational", version = "1" }
+ckb-resource = { path = "resource", version = "1" }
+ckb-reward-calculator = { path = "util/reward-calculator", version = "1" }
+ckb-rich-indexer = { path = "util/rich-indexer", version = "1" }
+ckb-rpc = { path = "rpc", version = "1" }
+ckb-script = { path = "script", version = "1" }
+ckb-shared = { path = "shared", version = "1" }
+ckb-snapshot = { path = "util/snapshot", version = "1" }
+ckb-spawn = { path = "util/spawn", version = "1" }
+ckb-stop-handler = { path = "util/stop-handler", version = "1" }
+ckb-store = { path = "store", version = "1" }
+ckb-sync = { path = "sync", version = "1" }
+ckb-system-scripts = "=0.5.4"
+ckb-systemtime = { path = "util/systemtime", version = "1" }
+ckb-test-chain-utils = { path = "util/test-chain-utils", version = "1" }
+ckb-test = { path = "test", version = "1" }
+ckb-traits = { path = "traits", version = "1" }
+ckb-tx-pool = { path = "tx-pool", version = "1" }
+ckb-types = { path = "util/types", version = "1" }
+ckb-util = { path = "util", version = "1" }
+ckb-verification = { path = "verification", version = "1" }
+ckb-verification-contextual = { path = "verification/contextual", version = "1" }
+ckb-verification-traits = { path = "verification/traits", version = "1" }
+ckb-vm = { version = "=0.24.14", default-features = false }
+clap = "=4.4"
+console = ">=0.9.1, <1.0.0"
+console-subscriber = "0.4.0"
+criterion = "0.5"
+crossbeam = "0.8.2"
+crossbeam-channel = "0.5.1"
+ctrlc = "3.1"
+data-encoding = "2.6"
+daggy = "0.8.0"
+dashmap = "6.0"
+derive_more = { version = "1", default-features = false }
+eaglesong = "0.1"
+ed25519-dalek = "2.1"
+env_logger = "0.10"
+fail = "0.4"
+faster-hex = "0.6"
+faux = "0.1"
+fdlimit = "0.2.1"
+fs2 = "0.4.3"
+futures = "0.3"
+futures-util = "0.3.21"
+golomb-coded-set = "0.2.0"
+governor = { version = "0.10", default-features = false, features = [
+  "std",
+  "jitter",
+  "quanta",
+] }
+hex = "0.4"
+hickory-resolver = "0.24.2"
+hmac = "0.12"
+http-body-util = "0.1"
+hyper = "1"
+hyper-tls = "0.6"
+hyper-util = "0.1"
+include_dir = "0.7"
+includedir = "0.6.0"
+includedir_codegen = "0.6.0"
+indicatif = { version = "0.18", features = ["rayon"] }
+ipnetwork = "0.20"
+is-terminal = "0.4.7"
+is_sorted = "0.1.1"
+jsonrpc-core = "18.0"
+jsonrpc-utils = "0.6"
+keyed_priority_queue = "0.3"
+libc = "0.2"
+linked-hash-map = "0.5"
+log = "0.4"
+lru = "0.7.1"
+memchr = "2.7"
+merkle-cbt = "0.3"
+minstant = "0.1.4"
+molecule = { version = "0.9.0", default-features = false }
+multi_index_map = "0.15.0"
+multiaddr = { version = "0.3.7", package = "tentacle-multiaddr" }
+num_cpus = "1.16.0"
+numext-fixed-uint = "0.1"
+p2p = { version = "0.7.6", package = "tentacle", default-features = false }
+parking_lot = "0.12"
+paste = "1.0"
+path-clean = "0.1.0"
+pretty_assertions = "1.3.0"
+proc-macro2 = "1.0"
+prometheus = "0.13.3"
+prometheus-static-metric = "0.5.1"
+proptest = "1.0"
+quote = "1.0"
+rand = "0.8.5"
+rand_distr = "0.4"
+rayon = "1.0"
+regex = "1.1.6"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+rhai = "1.16.0"
+rocksdb = { version = "=0.21.1", package = "ckb-rocksdb", default-features = false }
+rustc-hash = "1.1"
+secio = { version = "0.6.8", package = "tentacle-secio" }
+secp256k1 = "0.30"
+semver = "1.0"
+sentry = "0.34.0"
+sha2 = "0.10"
+serde = "1.0"
+serde_json = "1.0"
+serde_plain = "0.3.0"
+slab = "0.4"
+sled = "0.34.7"
+snap = "1"
+sql-builder = "3.1"
+sqlx = "0.8.2"
+subtle = "2.6"
+syn = "2.0"
+tera = "1"
+thiserror = "1.0.22"
+time = "0.3.36"
+tiny-keccak = "2.0"
+tokio = "1.35.0"
+tokio-util = "0.7.8"
+toml = "0.5"
+tower-http = "0.6"
+ubyte = "0.10"
+url = "2.2.2"
+walkdir = "2.1.4"
+yansi = "0.5"
+seq-macro = "0.3"
+strum = { version = "0.27", default-features = false, features = ["derive"] }
+phf = { version = "0.12", features = ["macros"] }
+sysinfo = "0.37"
+
+[profile.release]
+overflow-checks = true
+
+[profile.release.build-override]
+opt-level = 3
+
+[profile.bench.build-override]
+opt-level = 3
+
+[profile.prod]
+inherits = "release"
+lto = true
+codegen-units = 1
+
+[features]
+default = []
+deadlock_detection = ["ckb-bin/deadlock_detection"]
+with_sentry = ["ckb-bin/with_sentry"]
+with_dns_seeding = ["ckb-bin/with_dns_seeding"]
+profiling = ["tikv-jemallocator/profiling", "ckb-bin/profiling"]
+portable = ["ckb-bin/portable"]
+march-native = ["ckb-bin/march-native"]
+tokio-trace = ["console-subscriber"]

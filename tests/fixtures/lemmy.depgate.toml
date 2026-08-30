@@ -1,0 +1,37 @@
+# Migration policy for LemmyNet/lemmy@439734d, distilled from `.woodpecker.yml`
+# L195-205, the `check_disallowed_dependencies` step. That step is four
+# assertions, of which two are expressible in schema 1:
+#
+#   L201  "! cargo tree -p lemmy_api_common --no-default-features -i diesel"
+#   L202  "! cargo tree -i aws-lc-sys"
+#   L203  "! cargo tree -i extism"
+#   L204  "cargo tree --all-features -i extism"
+#
+# L202 and L203 are the `deny` rule below. `cargo tree -i <name>` with no `-p`
+# asks a workspace-wide reachability question, and `lemmy_server` is the binary
+# that closes over every other member, so rooting the rule there reproduces it.
+# Neither name is in the resolve at this commit, so the rule is reported as a
+# configured rule that matched nothing -- which is exactly what the CI assertion
+# checks.
+#
+# L201 is NOT modelled. `diesel` is reachable from `lemmy_api_common` through
+# `lemmy_db_schema`, where it is declared `optional = true`. `cargo metadata`
+# keeps optional dependency edges in `resolve` whatever feature selection it is
+# run with, and the gate walks the workspace-unified superset, so a `deny` rule
+# for it fires with witness `lemmy_api_common -> lemmy_db_schema -> diesel
+# (optional)` no matter how the fixture is generated. The CI assertion is
+# specifically about `--no-default-features` switching that optional edge off,
+# which schema 1 has no way to express.
+#
+# L204 is a positive assertion -- "extism must be reachable under
+# --all-features" -- and schema 1 has no `require` rule kind.
+schema = 1
+
+# lemmy does not enforce workspace version inheritance; 54 member dependency
+# entries name a version at this commit, so the default-on manifest rule is
+# turned off rather than encoding a policy the project does not hold.
+[manifest]
+versions-in-root = false
+
+[rules.lemmy_server]
+deny = ["aws-lc-sys", "extism"]

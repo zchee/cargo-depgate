@@ -312,7 +312,7 @@ fn evaluate_deny(
     globs: &globset::GlobSet,
 ) -> RuleResult {
     // The closure includes the root itself; a pattern that happens to match the
-    // rule's own package (`deny = ["ganja-*"]` on `rules.ganja-core`) is not a
+    // rule's own package (`deny = ["acme-*"]` on `rules.acme-core`) is not a
     // dependency finding, so the root's name never matches (`RuleKind::Deny` docs).
     let root_name = graph.name_id(root);
     let mut matches = Vec::new();

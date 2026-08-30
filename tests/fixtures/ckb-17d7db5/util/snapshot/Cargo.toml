@@ -1,0 +1,28 @@
+[package]
+name = "ckb-snapshot"
+version = "1.1.1"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "Rocksdb snapshot wrapper"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ckb-types.workspace = true
+ckb-chain-spec.workspace = true
+ckb-store.workspace = true
+ckb-db.workspace = true
+ckb-traits.workspace = true
+ckb-proposal-table.workspace = true
+arc-swap.workspace = true
+ckb-db-schema.workspace = true
+ckb-freezer.workspace = true
+ckb-merkle-mountain-range.workspace = true
+
+[features]
+portable = ["ckb-db/portable", "ckb-store/portable"]
+march-native = ["ckb-db/march-native", "ckb-store/march-native"]

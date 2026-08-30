@@ -1,0 +1,24 @@
+[package]
+name = "ckb-memory-tracker"
+version = "1.1.2"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+license = "MIT"
+description = "Track the memory usage of CKB"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-logger.workspace = true
+ckb-metrics.workspace = true
+ckb-db.workspace = true
+
+[target.'cfg(all(not(target_env = "msvc"), not(target_os="macos")))'.dependencies]
+jemalloc-ctl = { package = "tikv-jemalloc-ctl", version = "0.5.0" }
+jemalloc-sys = { package = "tikv-jemalloc-sys", version = "0.5.0" }
+libc = "0.2"
+
+[features]
+default = []
+profiling = []

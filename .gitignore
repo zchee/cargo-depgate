@@ -22,6 +22,3 @@ rustc-ice-*.txt
 
 # hermetic cargo-metadata fixtures (the global excludes file ignores *.gz)
 !tests/fixtures/**/*.gz
-
-# published migration patch (the global excludes file ignores *.diff)
-!docs/migration/*.diff

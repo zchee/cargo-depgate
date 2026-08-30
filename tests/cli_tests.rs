@@ -95,12 +95,37 @@ fn violations_fixture_root() -> PathBuf {
     repository_root().join("tests/fixtures/ws-violations")
 }
 
-fn ganja_fixture_root() -> PathBuf {
-    repository_root().join("tests/fixtures/ganja-code-153bfb1")
+/// One committed example fixture: a real upstream workspace pinned to one commit, with
+/// the upstream dependency policy distilled into `<name>.depgate.toml`.
+///
+/// `directory` is both the home of `metadata.json.gz` and the `--workspace-root` the
+/// gate is given: the manifest rule re-reads member manifests relative to that root, so
+/// it must be the committed directory, not the neutral `/fixture/<name>` prefix the
+/// document's own paths carry.
+struct Example {
+    directory: &'static str,
+    config: &'static str,
 }
 
-fn ganja_config_path() -> PathBuf {
-    repository_root().join("tests/fixtures/ganja-code.depgate.toml")
+const LEMMY: Example = Example {
+    directory: "tests/fixtures/lemmy-439734d",
+    config: "tests/fixtures/lemmy.depgate.toml",
+};
+const CKB: Example =
+    Example { directory: "tests/fixtures/ckb-17d7db5", config: "tests/fixtures/ckb.depgate.toml" };
+const COREUTILS: Example = Example {
+    directory: "tests/fixtures/coreutils-6341084",
+    config: "tests/fixtures/coreutils.depgate.toml",
+};
+
+impl Example {
+    fn fixture_root(&self) -> PathBuf {
+        repository_root().join(self.directory)
+    }
+
+    fn config_path(&self) -> PathBuf {
+        repository_root().join(self.config)
+    }
 }
 
 fn config_error_fixture_root() -> PathBuf {
@@ -259,16 +284,95 @@ fn metadata_check(
     command.output().expect("cargo-depgate should execute metadata-backed check")
 }
 
-/// Decompresses the committed ganja-code metadata into a temporary file.
-fn ganja_metadata_json() -> (tempfile::TempDir, PathBuf) {
+/// Decompresses one committed example's metadata into a temporary file.
+fn example_metadata_json(example: &Example) -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().expect("temporary directory should be created");
     let metadata_path = temp.path().join("metadata.json");
-    let compressed = fs::File::open(ganja_fixture_root().join("metadata.json.gz"))
-        .expect("ganja metadata fixture should be readable");
+    let compressed = fs::File::open(example.fixture_root().join("metadata.json.gz"))
+        .expect("example metadata fixture should be readable");
     let mut decoder = GzDecoder::new(compressed);
     let mut metadata = fs::File::create(&metadata_path).expect("metadata JSON should be writable");
-    std::io::copy(&mut decoder, &mut metadata).expect("ganja metadata should decompress");
+    std::io::copy(&mut decoder, &mut metadata).expect("example metadata should decompress");
     (temp, metadata_path)
+}
+
+/// Runs `check` on one committed example, offline, with the given extra options.
+fn example_check(example: &Example, options: &[&str]) -> (tempfile::TempDir, Output) {
+    let (temp, metadata) = example_metadata_json(example);
+    // `--format` defaults to `github` when GITHUB_ACTIONS is set, so the runner's own
+    // environment must not decide which renderer these assertions see.
+    let output = depgate()
+        .env_remove("GITHUB_ACTIONS")
+        .args(["check", "--metadata-json"])
+        .arg(&metadata)
+        .args(["--workspace-root"])
+        .arg(example.fixture_root())
+        .args(["--config"])
+        .arg(example.config_path())
+        .args(options)
+        .output()
+        .expect("cargo-depgate should execute the example check");
+    (temp, output)
+}
+
+/// Runs `explain` on one committed example, offline, on the same path `check` takes.
+fn example_explain(
+    example: &Example,
+    package: &str,
+    dependency: &str,
+) -> (tempfile::TempDir, Output) {
+    let (temp, metadata) = example_metadata_json(example);
+    let output = depgate()
+        .env_remove("GITHUB_ACTIONS")
+        .args(["explain", package, dependency, "--metadata-json"])
+        .arg(&metadata)
+        .args(["--workspace-root"])
+        .arg(example.fixture_root())
+        .args(["--config"])
+        .arg(example.config_path())
+        .arg("--offline")
+        .output()
+        .expect("cargo-depgate should execute the example explain");
+    (temp, output)
+}
+
+/// The counters every example asserts, in the order the fixture report records them.
+struct ExpectedCounters {
+    packages: u64,
+    members: u64,
+    normal_edges: u64,
+    names: u64,
+    superset_extra_edges: u64,
+    rules: u64,
+    violations: u64,
+}
+
+fn assert_counters(report: &serde_json::Value, expected: &ExpectedCounters) {
+    let counters = &report["counters"];
+    assert_eq!(counters["packages"].as_u64(), Some(expected.packages));
+    assert_eq!(counters["members"].as_u64(), Some(expected.members));
+    assert_eq!(counters["normal_edges"].as_u64(), Some(expected.normal_edges));
+    assert_eq!(counters["names"].as_u64(), Some(expected.names));
+    assert_eq!(counters["superset_extra_edges"].as_u64(), Some(expected.superset_extra_edges));
+    assert_eq!(counters["rules"].as_u64(), Some(expected.rules));
+    assert_eq!(counters["violations"].as_u64(), Some(expected.violations));
+    assert_eq!(counters["unrebased_path_deps"].as_u64(), Some(0));
+}
+
+/// Snapshots one example's counters block, timings removed.
+///
+/// The snapshot name is passed explicitly: insta derives it from the enclosing
+/// function, which is this shared helper, so all three examples would otherwise
+/// collide on one file.
+fn assert_counters_snapshot(name: &str, report: serde_json::Value) {
+    let report = without_timings(report);
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        let counters = serde_json::to_string_pretty(&report["counters"])
+            .expect("example counters should serialize");
+        insta::assert_snapshot!(name, counters);
+    });
 }
 
 fn first_dependency_mut(metadata: &mut serde_json::Value) -> &mut serde_json::Value {
@@ -953,78 +1057,221 @@ fn explain_accepts_metadata_json_and_workspace_root() {
 }
 
 #[test]
-fn ganja_metadata_check_passes_with_pinned_graph_counters() {
-    let (_temp, metadata) = ganja_metadata_json();
-    let fixture = ganja_fixture_root();
-    let output = depgate()
-        .args(["check", "--metadata-json"])
-        .arg(&metadata)
-        .args(["--workspace-root"])
-        .arg(&fixture)
-        .args(["--config"])
-        .arg(ganja_config_path())
-        .args(["--format", "json", "--offline"])
-        .output()
-        .expect("cargo-depgate should execute the ganja metadata check");
+fn lemmy_metadata_check_passes_with_pinned_graph_counters() {
+    let (_temp, output) = example_check(&LEMMY, &["--format", "json", "--offline"]);
 
-    assert_eq!(output.status.code(), Some(0), "ganja metadata check failed: {output:?}");
+    assert_eq!(output.status.code(), Some(0), "lemmy metadata check failed: {output:?}");
     let report: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("ganja report should be valid JSON");
-    let counters = &report["counters"];
-    assert_eq!(counters["packages"].as_u64(), Some(585));
-    assert_eq!(counters["members"].as_u64(), Some(14));
-    assert_eq!(counters["normal_edges"].as_u64(), Some(1_586));
-    assert_eq!(counters["names"].as_u64(), Some(529));
-    assert_eq!(counters["rules"].as_u64(), Some(19));
-    assert_eq!(counters["violations"].as_u64(), Some(0));
-    assert_eq!(counters["unrebased_path_deps"].as_u64(), Some(0));
+        serde_json::from_slice(&output.stdout).expect("lemmy report should be valid JSON");
+    assert_counters(
+        &report,
+        &ExpectedCounters {
+            packages: 707,
+            members: 41,
+            normal_edges: 2_444,
+            names: 603,
+            superset_extra_edges: 311,
+            rules: 1,
+            violations: 0,
+        },
+    );
+    assert_eq!(
+        report["violations"].as_array().map(Vec::len),
+        Some(0),
+        "the distilled lemmy policy holds at 439734d: {report}"
+    );
 }
 
 #[test]
-fn ganja_metadata_check_counters_snapshot() {
-    let (_temp, metadata) = ganja_metadata_json();
-    let fixture = ganja_fixture_root();
-    let output = depgate()
-        .args(["check", "--metadata-json"])
-        .arg(&metadata)
-        .args(["--workspace-root"])
-        .arg(&fixture)
-        .args(["--config"])
-        .arg(ganja_config_path())
-        .args(["--format", "json", "--offline"])
-        .output()
-        .expect("cargo-depgate should execute the ganja metadata snapshot");
+fn lemmy_metadata_check_counters_snapshot() {
+    let (_temp, output) = example_check(&LEMMY, &["--format", "json", "--offline"]);
 
-    assert_eq!(output.status.code(), Some(0), "ganja metadata snapshot failed: {output:?}");
+    assert_eq!(output.status.code(), Some(0), "lemmy metadata snapshot failed: {output:?}");
     let report: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("ganja report should be valid JSON");
-    let report = without_timings(report);
-    insta::with_settings!({
-        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
-    }, {
-        let counters = serde_json::to_string_pretty(&report["counters"])
-            .expect("ganja counters should serialize");
-        insta::assert_snapshot!(counters);
-    });
+        serde_json::from_slice(&output.stdout).expect("lemmy report should be valid JSON");
+    assert_counters_snapshot("lemmy_metadata_check_counters_snapshot", report);
 }
 
 #[test]
-fn ganja_explain_ratatui_is_not_reachable() {
-    let (_temp, metadata) = ganja_metadata_json();
-    let fixture = ganja_fixture_root();
-    let output = depgate()
-        .args(["explain", "ganja-core", "ratatui", "--metadata-json"])
-        .arg(&metadata)
-        .args(["--workspace-root"])
-        .arg(&fixture)
-        .args(["--config"])
-        .arg(ganja_config_path())
-        .arg("--offline")
-        .output()
-        .expect("cargo-depgate should execute the ganja explain");
+fn ckb_metadata_check_reports_every_uninherited_version() {
+    let (_temp, output) = example_check(&CKB, &["--format", "json", "--offline"]);
 
-    assert_eq!(output.status.code(), Some(0), "ganja explain failed: {output:?}");
+    assert_eq!(output.status.code(), Some(1), "ckb metadata check should violate: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ckb report should be valid JSON");
+    // One failed rule, but 24 separate records: the manifest rule reports one finding per
+    // dependency entry that names a version, so the counter and the array differ on purpose.
+    assert_counters(
+        &report,
+        &ExpectedCounters {
+            packages: 714,
+            members: 75,
+            normal_edges: 2_351,
+            names: 641,
+            superset_extra_edges: 0,
+            rules: 1,
+            violations: 1,
+        },
+    );
+    let records = report["violations"].as_array().expect("violations should be an array");
+    assert_eq!(records.len(), 24, "ckb records drifted at 17d7db5: {report}");
+    assert!(
+        records.iter().all(|record| record["rule_id"] == "manifest.versions-in-root"
+            && record["kind"] == "manifest"),
+        "every ckb record belongs to the manifest rule: {report}"
+    );
+
+    // `phf` is the plainest of the 24: an ordinary `[dependencies]` entry in a member,
+    // not one of the 22 target-gated tables, so it pins the shape of a record end to end.
+    let phf = records
+        .iter()
+        .find(|record| record["dependency"] == "phf")
+        .unwrap_or_else(|| panic!("ckb report is missing the phf record: {report}"));
+    assert_eq!(phf["package"], "ckb-resource");
+    assert_eq!(phf["table"], "dependencies");
+    assert_eq!(phf["version"], "= 0.8.0");
+    assert_eq!(phf["span"]["file"], "resource/Cargo.toml");
+    // The column is pinned as well as the line because `docs/examples.md` renders this record as
+    // `--> resource/Cargo.toml:14:7` with a caret run under `"= 0.8.0"`; a column regression would
+    // otherwise stale the document silently.
+    assert_eq!(phf["span"]["line"].as_u64(), Some(14));
+    assert_eq!(phf["span"]["col"].as_u64(), Some(7));
+}
+
+#[test]
+fn ckb_metadata_check_counters_snapshot() {
+    let (_temp, output) = example_check(&CKB, &["--format", "json", "--offline"]);
+
+    assert_eq!(output.status.code(), Some(1), "ckb metadata snapshot should violate: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ckb report should be valid JSON");
+    assert_counters_snapshot("ckb_metadata_check_counters_snapshot", report);
+}
+
+#[test]
+fn coreutils_metadata_check_reports_the_optional_ariadne_edge() {
+    let (_temp, output) = example_check(&COREUTILS, &["--format", "json", "--offline"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "coreutils metadata check should violate: {output:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("coreutils report should be valid JSON");
+    assert_counters(
+        &report,
+        &ExpectedCounters {
+            packages: 498,
+            members: 114,
+            normal_edges: 1_453,
+            names: 468,
+            superset_extra_edges: 329,
+            rules: 1,
+            violations: 1,
+        },
+    );
+    let records = report["violations"].as_array().expect("violations should be an array");
+    assert_eq!(records.len(), 1, "coreutils records drifted at 6341084: {report}");
+    let ariadne = &records[0];
+    assert_eq!(ariadne["rule_id"], "rules.coreutils.deny");
+    assert_eq!(ariadne["kind"], "deny");
+    let matched = ariadne["matches"].as_array().expect("matches should be an array");
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0]["name"], "ariadne");
+    // The witness is the whole point of this example: `ariadne` is reached only through
+    // `uucore`, which declares it `optional = true`. The resolve `cargo metadata` emits is
+    // workspace-unified, so an optional edge any member activates survives the
+    // `--no-default-features --features feat_os_unix` this fixture was generated with, and the
+    // superset the gate walks reports it even though coreutils' own `cargo tree` does not.
+    // `superset_extra_edges` above is the counter that measures the same exposure.
+    let witness = matched[0]["witness"].as_array().expect("witness should be an array");
+    assert_eq!(witness.len(), 2);
+    assert_eq!(witness[0]["name"], "uucore");
+    assert_eq!(witness[0]["optional"], serde_json::Value::Bool(false));
+    assert_eq!(witness[1]["name"], "ariadne");
+    assert_eq!(witness[1]["optional"], serde_json::Value::Bool(true));
+}
+
+#[test]
+fn coreutils_human_report_annotates_the_optional_witness_edge() {
+    let (_temp, output) = example_check(&COREUTILS, &["--offline"]);
+
+    assert_eq!(output.status.code(), Some(1), "coreutils human check should violate: {output:?}");
+    let rendered = cleaned_stdout(&output);
+    let witness = "coreutils v0.10.0 \u{2192} uucore v0.10.0 \u{2192} ariadne v0.6.0 \
+         (optional; present via workspace feature unification)";
+    assert!(rendered.contains(witness), "optional witness {witness:?} missing from: {rendered}");
+}
+
+#[test]
+fn coreutils_metadata_check_counters_snapshot() {
+    let (_temp, output) = example_check(&COREUTILS, &["--format", "json", "--offline"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "coreutils metadata snapshot should violate: {output:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("coreutils report should be valid JSON");
+    assert_counters_snapshot("coreutils_metadata_check_counters_snapshot", report);
+}
+
+#[test]
+fn lemmy_human_report_lists_the_rule_that_matched_nothing() {
+    let (_temp, output) = example_check(&LEMMY, &["--offline"]);
+
+    assert_eq!(output.status.code(), Some(0), "lemmy human check should pass: {output:?}");
+    // `docs/examples.md` quotes both lines verbatim, and the first one is the point of the
+    // example: a rule that found nothing is still listed, because a green gate that quietly
+    // checked nothing is a failure mode rather than a pass.
+    assert_eq!(cleaned_stdout(&output), "ok rules.lemmy_server.deny\nok: 1 rules, 0 violations\n");
+}
+
+#[test]
+fn lemmy_explain_resolves_the_member_and_not_the_crates_io_copy() {
+    let (_temp, output) = example_explain(&LEMMY, "lemmy_utils", "diesel");
+
+    assert_eq!(output.status.code(), Some(0), "lemmy explain failed: {output:?}");
+    // `lemmy_utils` resolves at two versions here -- the workspace member at 1.0.0-beta.1 and
+    // the crates.io copy at 0.19.16 pulled in transitively -- and only the member declares
+    // `diesel`. `explain` must bind the same node a `[rules.lemmy_utils]` root binds, so this is
+    // the assertion that keeps `explain` and `check` from contradicting each other: the identical
+    // deny rule reports exactly this witness. `.woodpecker.yml` L201 asks the narrower,
+    // feature-resolved form of the same question, which schema 1 cannot ask.
+    assert_eq!(
+        cleaned_stdout(&output),
+        "lemmy_utils v1.0.0-beta.1 \u{2192} diesel v2.3.7 \
+         (optional; present via workspace feature unification)\n"
+    );
+}
+
+#[test]
+fn lemmy_explain_reports_a_genuinely_unreachable_pair() {
+    let (_temp, output) = example_explain(&LEMMY, "lemmy_utils", "actix-cors");
+
+    assert_eq!(output.status.code(), Some(0), "lemmy explain failed: {output:?}");
+    // The inverse of the case above, on the same member: `actix-cors` is in the graph but only
+    // `lemmy_server` reaches it, so "not reachable" here is a real negative rather than the
+    // artefact of resolving the wrong node.
     assert_eq!(cleaned_stdout(&output), "not reachable\n");
+}
+
+#[test]
+fn lemmy_explain_refuses_an_ambiguous_non_member_package() {
+    let (_temp, output) = example_explain(&LEMMY, "bitflags", "diesel");
+
+    // No workspace member is named `bitflags` and the graph carries it at two versions, so there
+    // is no rule-root equivalent to resolve to. Picking one silently would make the verdict depend
+    // on `cargo metadata`'s package order, so the query is refused as a configuration error.
+    assert_eq!(output.status.code(), Some(2), "ambiguous explain succeeded: {output:?}");
+    assert!(output.stdout.is_empty(), "ambiguous explain wrote to stdout: {output:?}");
+    assert_eq!(
+        cleaned_stderr(&output),
+        "error: explain references `bitflags`, which is not a workspace member and resolves at \
+         2 versions: 1.3.2, 2.11.0; explain resolves workspace members, so name one instead\n"
+    );
 }
 
 #[test]
@@ -1477,17 +1724,7 @@ fn json_features_reports_the_all_features_override() {
 
 #[test]
 fn json_features_is_null_when_no_cargo_ran() {
-    let (_temp, metadata) = ganja_metadata_json();
-    let output = depgate()
-        .args(["check", "--metadata-json"])
-        .arg(&metadata)
-        .args(["--workspace-root"])
-        .arg(ganja_fixture_root())
-        .args(["--config"])
-        .arg(ganja_config_path())
-        .args(["--format", "json"])
-        .output()
-        .expect("cargo-depgate should execute the metadata-backed check");
+    let (_temp, output) = example_check(&LEMMY, &["--format", "json"]);
 
     assert_eq!(output.status.code(), Some(0), "metadata-backed check failed: {output:?}");
     let report: serde_json::Value =
@@ -1505,19 +1742,12 @@ fn json_features_is_null_when_no_cargo_ran() {
 
 #[test]
 fn feature_flags_warn_when_metadata_json_makes_them_inert() {
-    let (_temp, metadata) = ganja_metadata_json();
-    let output = depgate()
-        .args(["check", "--metadata-json"])
-        .arg(&metadata)
-        .args(["--workspace-root"])
-        .arg(ganja_fixture_root())
-        .args(["--config"])
-        .arg(ganja_config_path())
-        // Never resolved: no Cargo runs, so the spec is not even checked for existence.
-        // That is precisely the silent failure the warning exists to break.
-        .args(["--all-features", "--features", "ganja-cli/tui", "--no-default-features"])
-        .output()
-        .expect("cargo-depgate should execute the metadata-backed check");
+    // The feature spec is never resolved: no Cargo runs, so it is not even checked for
+    // existence. That is precisely the silent failure the warning exists to break.
+    let (_temp, output) = example_check(
+        &LEMMY,
+        &["--all-features", "--features", "lemmy_server/embed-pictrs", "--no-default-features"],
+    );
 
     assert_eq!(
         output.status.code(),

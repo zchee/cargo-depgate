@@ -1,0 +1,30 @@
+[package]
+name = "ckb-db"
+version = "1.1.1"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "The ckb data persistent implementation"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-app-config.workspace = true
+ckb-logger.workspace = true
+ckb-error.workspace = true
+libc.workspace = true
+rocksdb = { workspace = true, features = [
+    "snappy",
+    "lz4",
+], default-features = false }
+ckb-db-schema.workspace = true
+
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+default = []
+portable = ["rocksdb/portable"]
+march-native = ["rocksdb/march-native"]

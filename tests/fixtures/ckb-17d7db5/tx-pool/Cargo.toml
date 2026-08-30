@@ -1,0 +1,65 @@
+[package]
+name = "ckb-tx-pool"
+version = "1.3.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB Tx-pool stores transactions, which is designed for CKB Two Step Transaction Confirmation mechanism"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ckb-types.workspace = true
+ckb-logger.workspace = true
+ckb-verification.workspace = true
+ckb-systemtime.workspace = true
+lru.workspace = true
+
+ckb-dao.workspace = true
+ckb-reward-calculator.workspace = true
+ckb-store.workspace = true
+ckb-util.workspace = true
+ckb-jsonrpc-types.workspace = true
+ckb-chain-spec.workspace = true
+ckb-snapshot.workspace = true
+ckb-metrics.workspace = true
+ckb-error.workspace = true
+tokio = { workspace = true, features = ["sync", "process"] }
+ckb-async-runtime.workspace = true
+ckb-stop-handler.workspace = true
+ckb-app-config.workspace = true
+ckb-network.workspace = true
+ckb-channel.workspace = true
+ckb-db.workspace = true
+ckb-script.workspace = true
+futures-util.workspace = true
+sentry = { workspace = true, optional = true }
+serde_json.workspace = true
+rand.workspace = true
+hyper = { workspace = true, features = ["http1", "http2", "client"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2"] }
+http-body-util.workspace = true
+multi_index_map.workspace = true
+slab.workspace = true
+rustc-hash.workspace = true
+tokio-util.workspace = true
+ckb-fee-estimator.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+ckb-hash.workspace = true
+ckb-systemtime = { workspace = true, features = ["enable_faketime"] }
+
+[features]
+default = []
+internal = []
+with_sentry = ["sentry"]
+portable = ["ckb-db/portable", "ckb-store/portable", "ckb-snapshot/portable"]
+march-native = [
+    "ckb-db/march-native",
+    "ckb-store/march-native",
+    "ckb-snapshot/march-native",
+]

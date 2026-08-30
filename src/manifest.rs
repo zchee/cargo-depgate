@@ -51,9 +51,11 @@
 //!
 //! A line-oriented scanner that tracks "the current table" misattributes the
 //! `name`/`harness` keys of `[[test]]`, `[[bin]]` or `[[bench]]` array-of-tables
-//! that follow `[dev-dependencies]` (ganja-code's `ganja-teammate-local` has exactly
-//! that layout). A real TOML parse attaches those entries to the top-level `test`
-//! array, so the dependency tables only ever contain dependency entries.
+//! that follow `[dev-dependencies]`. The layout is common: in the committed ckb
+//! fixture alone, `freezer/Cargo.toml` opens a `[[test]]` immediately after its
+//! `[dev-dependencies]`, and `network` and `benches` do the same with `[[bench]]`.
+//! A real TOML parse attaches those entries to the top-level `test` array, so the
+//! dependency tables only ever contain dependency entries.
 
 use std::{borrow::Cow, fmt, fs, path::PathBuf};
 

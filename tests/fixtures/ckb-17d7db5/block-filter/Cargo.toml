@@ -1,0 +1,20 @@
+[package]
+name = "ckb-block-filter"
+version = "1.1.1"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "Create block filter data for client-side filtering"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ckb-store.workspace = true
+ckb-shared.workspace = true
+ckb-logger.workspace = true
+ckb-types.workspace = true
+ckb-stop-handler.workspace = true
+ckb-async-runtime.workspace = true

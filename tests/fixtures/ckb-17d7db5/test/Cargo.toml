@@ -1,0 +1,56 @@
+[package]
+name = "ckb-test"
+publish = false
+version = "1.0.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB integration tests"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[[bin]]
+name = "ckb-test"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+toml.workspace = true
+ckb-jsonrpc-types.workspace = true
+ckb-app-config.workspace = true
+ckb-network.workspace = true
+ckb-channel.workspace = true
+ckb-types.workspace = true
+ckb-hash.workspace = true
+ckb-util.workspace = true
+ckb-chain-spec.workspace = true
+ckb-crypto.workspace = true
+ckb-dao-utils.workspace = true
+ckb-test-chain-utils.workspace = true
+ckb-resource.workspace = true
+ckb-async-runtime.workspace = true
+ckb-logger.workspace = true
+ckb-logger-config.workspace = true
+ckb-logger-service.workspace = true
+ckb-error.workspace = true
+ckb-constant.workspace = true
+ckb-onion.workspace = true
+ckb-store.workspace = true
+ckb-shared.workspace = true
+tempfile.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+ckb-systemtime.workspace = true
+serde_json.workspace = true
+byteorder.workspace = true
+jsonrpc-core.workspace = true
+ctrlc.workspace = true
+log.workspace = true
+
+[target.'cfg(not(target_os="windows"))'.dependencies]
+nix = { version = "0.29.0", default-features = false, features = ["signal"] }
+
+[features]
+default = []
+deadlock_detection = ["ckb-util/deadlock_detection"]

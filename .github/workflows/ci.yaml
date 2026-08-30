@@ -34,8 +34,19 @@ jobs:
       - name: Check committed fixture size
         shell: bash
         run: |
-          test "$(du -sk tests/fixtures | awk '{print $1}')" -le 1536
-          git ls-files --error-unmatch tests/fixtures/ganja-code-153bfb1/metadata.json.gz >/dev/null
+          # Tracked bytes, not `du -sk`: block allocation is filesystem-dependent (ext4
+          # charges a 4 KiB block per directory, APFS charges none), and tests/fixtures
+          # now spans 155 directories, so the same tree measures ~1.4 MB on macOS and
+          # ~2.0 MB on Linux. Bytes are the property this bound is actually about, and
+          # counting only tracked files is what the repository pays for. 767,743 B today.
+          test "$(git ls-files -z tests/fixtures | xargs -0 cat | wc -c | tr -d '[:space:]')" -le 1048576
+          git ls-files --error-unmatch \
+            tests/fixtures/lemmy-439734d/metadata.json.gz \
+            tests/fixtures/ckb-17d7db5/metadata.json.gz \
+            tests/fixtures/coreutils-6341084/metadata.json.gz >/dev/null
+          # ckb is the one example whose config enables the manifest rule, so the gate
+          # re-reads its member manifests: their absence would silently change the verdict.
+          test "$(git ls-files 'tests/fixtures/ckb-17d7db5/' | grep -c '/Cargo\.toml$')" -eq 75
 
   nightly:
     runs-on: ubuntu-latest
@@ -68,8 +79,19 @@ jobs:
       - name: Check committed fixture size
         shell: bash
         run: |
-          test "$(du -sk tests/fixtures | awk '{print $1}')" -le 1536
-          git ls-files --error-unmatch tests/fixtures/ganja-code-153bfb1/metadata.json.gz >/dev/null
+          # Tracked bytes, not `du -sk`: block allocation is filesystem-dependent (ext4
+          # charges a 4 KiB block per directory, APFS charges none), and tests/fixtures
+          # now spans 155 directories, so the same tree measures ~1.4 MB on macOS and
+          # ~2.0 MB on Linux. Bytes are the property this bound is actually about, and
+          # counting only tracked files is what the repository pays for. 767,743 B today.
+          test "$(git ls-files -z tests/fixtures | xargs -0 cat | wc -c | tr -d '[:space:]')" -le 1048576
+          git ls-files --error-unmatch \
+            tests/fixtures/lemmy-439734d/metadata.json.gz \
+            tests/fixtures/ckb-17d7db5/metadata.json.gz \
+            tests/fixtures/coreutils-6341084/metadata.json.gz >/dev/null
+          # ckb is the one example whose config enables the manifest rule, so the gate
+          # re-reads its member manifests: their absence would silently change the verdict.
+          test "$(git ls-files 'tests/fixtures/ckb-17d7db5/' | grep -c '/Cargo\.toml$')" -eq 75
       - name: Run hermetic performance gates
         shell: bash
         run: bash scripts/perf.sh --profile ci

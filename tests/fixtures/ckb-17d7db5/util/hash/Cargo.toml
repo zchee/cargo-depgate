@@ -1,0 +1,25 @@
+[package]
+name = "ckb-hash"
+version = "1.1.1"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB default hash function"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[features]
+default = ["blake2b-ref", "blake2b-rs"]
+ckb-contract = [
+    "blake2b-ref",
+] # This feature is used for CKB contract development
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+blake2b-rs = { version = "0.2", optional = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+blake2b-ref = { version = "0.3", optional = true }
+
+[dependencies]
+blake2b-ref = { workspace = true, optional = true }

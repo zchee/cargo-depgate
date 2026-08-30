@@ -1,0 +1,19 @@
+[package]
+name = "ckb-rational"
+version = "1.1.2"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "Rational numbers"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+numext-fixed-uint = { workspace = true, features = ["support_rand", "support_heapsize", "support_serde"] }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+proptest.workspace = true

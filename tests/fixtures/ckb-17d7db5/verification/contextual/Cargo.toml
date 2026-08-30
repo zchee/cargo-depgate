@@ -1,0 +1,35 @@
+[package]
+name = "ckb-verification-contextual"
+version = "1.2.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB verification contextual"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-types.workspace = true
+ckb-store.workspace = true
+ckb-systemtime.workspace = true
+rayon.workspace = true
+ckb-traits.workspace = true
+ckb-chain-spec.workspace = true
+ckb-dao.workspace = true
+ckb-dao-utils.workspace = true
+ckb-logger.workspace = true
+ckb-reward-calculator.workspace = true
+ckb-error.workspace = true
+tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
+ckb-async-runtime.workspace = true
+ckb-verification-traits.workspace = true
+ckb-verification.workspace = true
+ckb-merkle-mountain-range.workspace = true
+
+[dev-dependencies]
+ckb-chain.workspace = true
+ckb-shared.workspace = true
+ckb-test-chain-utils.workspace = true
+ckb-systemtime = { workspace = true, features = ["enable_faketime"] }
+rand.workspace = true

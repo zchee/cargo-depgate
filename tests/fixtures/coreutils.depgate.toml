@@ -1,0 +1,30 @@
+# Migration policy for uutils/coreutils@6341084, distilled from
+# `.github/workflows/CICD.yml` L984-996, the "Verify ariadne is compiled out"
+# step:
+#
+#   if cargo tree -p coreutils --no-default-features --features feat_os_unix \
+#        -e normal -i ariadne 2>/dev/null; then ... exit 1; fi
+#
+# The documented invocation is `--no-default-features --features feat_os_unix`,
+# and the fixture's metadata document is generated with exactly those flags
+# (see scripts/fixture.sh); the gate's own feature flags are inert under
+# `--metadata-json`.
+#
+# This rule FIRES at the pinned commit, and the fixture records that: the gate
+# reports `coreutils -> uucore -> ariadne (optional)`. coreutils' own CI is
+# green here. The difference is not a defect in either -- `ariadne` is declared
+# `optional = true` by `uucore`, and the workspace-unified resolve keeps an
+# optional edge any member activates even under the documented flags. The gate
+# walks that superset by design (README, "Cargo feature gap table").
+# `cargo tree -p coreutils --no-default-features ...` asks the narrower,
+# feature-resolved question that schema 1 cannot ask.
+schema = 1
+
+# coreutils' root manifest names versions on its `uu_*` path dependencies
+# because they are published to crates.io; that is a publishing requirement,
+# not a policy deviation, so the default-on manifest rule is turned off.
+[manifest]
+versions-in-root = false
+
+[rules.coreutils]
+deny = ["ariadne"]

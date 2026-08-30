@@ -1,0 +1,29 @@
+[package]
+name = "ckb-logger-service"
+version = "1.1.2"
+license = "MIT"
+authors = ["Nervos <dev@nervos.org>"]
+edition = "2024"
+description = "CKB logger and logging service"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-util.workspace = true
+ckb-logger-config.workspace = true
+ckb-channel.workspace = true
+yansi.workspace = true
+log.workspace = true
+env_logger.workspace = true
+regex.workspace = true
+backtrace.workspace = true
+sentry = { workspace = true, features = ["log"], optional = true }
+time = { workspace = true, features = ["formatting"] }
+ckb-notify.workspace = true
+[dev-dependencies]
+ckb-logger.workspace = true
+tempfile.workspace = true
+
+[features]
+with_sentry = ["sentry"]

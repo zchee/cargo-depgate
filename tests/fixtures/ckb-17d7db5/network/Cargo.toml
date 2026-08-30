@@ -1,0 +1,74 @@
+[package]
+name = "ckb-network"
+version = "1.2.3"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "ckb network module"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+exclude = ["fuzz"]
+
+[dependencies]
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+ckb-util.workspace = true
+ckb-stop-handler.workspace = true
+ckb-logger.workspace = true
+ckb-app-config.workspace = true
+ckb-metrics.workspace = true
+tokio = { workspace = true, features = ["sync", "macros"] }
+tokio-util = { workspace = true, features = ["codec"] }
+futures.workspace = true
+ckb-systemtime.workspace = true
+bs58 = { workspace = true, optional = true }
+sentry = { workspace = true, optional = true }
+faster-hex = { workspace = true, optional = true }
+ckb-hash.workspace = true
+secp256k1 = { workspace = true, features = ["recovery"], optional = true }
+hickory-resolver = { workspace = true, optional = true }
+snap.workspace = true
+ckb-types.workspace = true
+ipnetwork.workspace = true
+serde_json.workspace = true
+bloom-filters.workspace = true
+ckb-spawn.workspace = true
+bitflags.workspace = true
+p2p = { workspace = true, default-features = false }
+url.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+p2p = { workspace = true, default-features = false, features = [
+    "upnp",
+    "parking_lot",
+    "openssl-vendored",
+    "tokio-runtime",
+    "tokio-timer",
+    "ws",
+] }
+socket2 = "0.6"
+governor.workspace = true
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+p2p = { workspace = true, default-features = false, features = ["wasm-timer"] }
+idb = "0.6"
+serde-wasm-bindgen = "0.6.5"
+
+
+[features]
+with_sentry = ["sentry"]
+with_dns_seeding = ["bs58", "faster-hex", "hickory-resolver", "secp256k1"]
+fuzz = []
+
+[dev-dependencies]
+tempfile.workspace = true
+criterion.workspace = true
+proptest.workspace = true
+num_cpus.workspace = true
+ckb-systemtime = { workspace = true, features = ["enable_faketime"] }
+
+[[bench]]
+name = "peer_store"
+harness = false
+path = "src/benches/peer_store.rs"

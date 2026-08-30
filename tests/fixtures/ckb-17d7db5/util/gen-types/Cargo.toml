@@ -1,0 +1,42 @@
+[package]
+name = "ckb-gen-types"
+version = "1.1.1"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2021"
+license = "MIT"
+description = "Provides the generated types for CKB"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dev-dependencies]
+ckb-hash.workspace = true
+
+[features]
+default = ["std"]
+# Enable the `calc-hash` extension for CKB contract development in `no-std` env
+calc-hash = ["ckb-hash/ckb-contract"]
+# Enable the `check-data` extension for CKB contract development in `no-std` env
+check-data = []
+# Enable the `serialized-size` extension for CKB contract development in `no-std` env
+serialized-size = ["calc-hash"]
+# Enable all in `std` env
+std = [
+    "molecule/std",
+    "ckb-hash/default",
+    "ckb-fixed-hash",
+    "ckb-error",
+    "ckb-occupied-capacity",
+    "numext-fixed-uint",
+]
+
+[dependencies]
+cfg-if.workspace = true
+molecule.workspace = true
+ckb-hash = { workspace = true, optional = true }
+ckb-fixed-hash = { workspace = true, optional = true }
+ckb-error = { workspace = true, optional = true }
+ckb-occupied-capacity = { workspace = true, optional = true }
+numext-fixed-uint = { workspace = true, features = ["support_rand", "support_heapsize", "support_serde"], optional = true }
+seq-macro.workspace = true
+strum.workspace = true

@@ -1,0 +1,58 @@
+[package]
+name = "ckb-shared"
+version = "1.1.2"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+license = "MIT"
+description = "Shared blockchain data and services"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-types.workspace = true
+ckb-chain-spec.workspace = true
+ckb-store.workspace = true
+ckb-db.workspace = true
+ckb-proposal-table.workspace = true
+arc-swap.workspace = true
+ckb-error.workspace = true
+ckb-snapshot.workspace = true
+ckb-tx-pool.workspace = true
+ckb-verification.workspace = true
+ckb-notify.workspace = true
+ckb-logger.workspace = true
+ckb-db-schema.workspace = true
+ckb-async-runtime.workspace = true
+ckb-stop-handler.workspace = true
+ckb-constant.workspace = true
+ckb-systemtime.workspace = true
+ckb-channel.workspace = true
+ckb-app-config.workspace = true
+ckb-migrate.workspace = true
+ckb-fee-estimator.workspace = true
+ckb-util.workspace = true
+ckb-metrics.workspace = true
+bitflags.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tempfile.workspace = true
+sled.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+ckb-systemtime = { workspace = true, features = ["enable_faketime"] }
+
+[features]
+portable = [
+    "ckb-db/portable",
+    "ckb-store/portable",
+    "ckb-tx-pool/portable",
+    "ckb-migrate/portable",
+]
+march-native = [
+    "ckb-db/march-native",
+    "ckb-store/march-native",
+    "ckb-tx-pool/march-native",
+    "ckb-migrate/march-native",
+]
+stats = []

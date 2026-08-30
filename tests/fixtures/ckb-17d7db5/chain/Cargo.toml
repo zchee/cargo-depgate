@@ -1,0 +1,56 @@
+[package]
+name = "ckb-chain"
+version = "1.3.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB chain service"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-logger.workspace = true
+ckb-metrics.workspace = true
+ckb-types.workspace = true
+ckb-shared.workspace = true
+ckb-chain-spec.workspace = true
+ckb-store.workspace = true
+ckb-verification.workspace = true
+ckb-verification-contextual.workspace = true
+ckb-verification-traits.workspace = true
+ckb-systemtime.workspace = true
+ckb-stop-handler.workspace = true
+ckb-proposal-table.workspace = true
+ckb-error.workspace = true
+ckb-app-config.workspace = true
+ckb-channel.workspace = true
+ckb-db.workspace = true
+ckb-db-schema.workspace = true
+faux = { workspace = true, optional = true }
+ckb-merkle-mountain-range.workspace = true
+is_sorted.workspace = true
+ckb-constant.workspace = true
+ckb-util.workspace = true
+crossbeam.workspace = true
+ckb-network.workspace = true
+ckb-tx-pool.workspace = true
+minstant.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+ckb-test-chain-utils.workspace = true
+ckb-dao-utils.workspace = true
+ckb-reward-calculator.workspace = true
+ckb-tx-pool = { workspace = true, features = ["internal"] }
+ckb-jsonrpc-types.workspace = true
+ckb-network.workspace = true
+tempfile.workspace = true
+ckb-systemtime = { workspace = true, features = ["enable_faketime"] }
+ckb-logger-service.workspace = true
+
+[features]
+default = []
+mock = ["faux"]
+portable = ["ckb-store/portable"]
+march-native = ["ckb-store/march-native"]

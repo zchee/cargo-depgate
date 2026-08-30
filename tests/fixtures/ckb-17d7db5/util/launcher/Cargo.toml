@@ -1,0 +1,44 @@
+[package]
+name = "ckb-launcher"
+version = "1.3.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "CKB launcher"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ckb-store.workspace = true
+ckb-app-config.workspace = true
+ckb-logger.workspace = true
+ckb-build-info.workspace = true
+ckb-jsonrpc-types.workspace = true
+ckb-chain.workspace = true
+ckb-shared.workspace = true
+ckb-network.workspace = true
+ckb-rpc.workspace = true
+ckb-resource.workspace = true
+ckb-network-alert.workspace = true
+ckb-sync.workspace = true
+ckb-verification.workspace = true
+ckb-verification-traits.workspace = true
+ckb-async-runtime.workspace = true
+ckb-channel.workspace = true
+ckb-tx-pool.workspace = true
+ckb-light-client-protocol-server.workspace = true
+ckb-block-filter.workspace = true
+ckb-constant.workspace = true
+ckb-onion.workspace = true
+
+[features]
+with_sentry = [
+    "ckb-sync/with_sentry",
+    "ckb-network/with_sentry",
+    "ckb-app-config/with_sentry",
+]
+portable = ["ckb-shared/portable"]
+march-native = ["ckb-shared/march-native"]

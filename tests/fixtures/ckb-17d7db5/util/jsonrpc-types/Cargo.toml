@@ -1,0 +1,23 @@
+[package]
+name = "ckb-jsonrpc-types"
+version = "1.2.0"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "Wrappers for JSON serialization"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+
+[dependencies]
+ckb-types.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+faster-hex.workspace = true
+schemars.workspace = true
+seq-macro.workspace = true
+
+
+[dev-dependencies]
+proptest.workspace = true
+regex.workspace = true

@@ -39,6 +39,9 @@ fn write_to_prints_one_tab_separated_line_per_phase_then_per_counter() {
     timings.add(Phase::Parse, Duration::from_micros(2345));
     timings.add(Phase::Parse, Duration::from_micros(5));
     timings.add(Phase::Graph, Duration::from_nanos(123_456));
+    // Ten deliberately distinct, arbitrary values: this test checks only that `write_to` emits
+    // one tab-separated line per phase and then per counter, in order, so what matters is that no
+    // two fields share a value and a swap would be visible. They are not any workspace's counters.
     let counters = Counters {
         packages: 585,
         members: 14,

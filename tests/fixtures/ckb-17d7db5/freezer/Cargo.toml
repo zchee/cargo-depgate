@@ -1,0 +1,30 @@
+[package]
+name = "ckb-freezer"
+version = "1.1.1"
+license = "MIT"
+authors = ["Nervos Core Dev <dev@nervos.org>"]
+edition = "2024"
+description = "Freezer is an memory mapped append-only database to store immutable chain data into flat files"
+homepage = "https://github.com/nervosnetwork/ckb"
+repository = "https://github.com/nervosnetwork/ckb"
+rust-version = "1.95.0"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ckb-types.workspace = true
+ckb-error.workspace = true
+ckb-logger.workspace = true
+ckb-util.workspace = true
+ckb-metrics.workspace = true
+fs2.workspace = true
+fail.workspace = true
+snap.workspace = true
+lru.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[test]]
+name = "failpoints"
+path = "tests/failpoints.rs"
+required-features = ["fail/failpoints"]

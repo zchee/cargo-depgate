@@ -41,7 +41,7 @@ use guppy::{
     platform::{EnabledTernary, PlatformSpec},
 };
 
-const DEFAULT_METADATA: &str = "/tmp/ganja-metadata.json";
+const DEFAULT_METADATA: &str = "/tmp/depgate-metadata.json";
 
 struct Options {
     metadata: PathBuf,
