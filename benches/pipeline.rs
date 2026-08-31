@@ -1,14 +1,16 @@
 //! Divan benchmarks for the real Cargo metadata pipeline and a calibrated synthetic graph.
+//!
+//! The harness crate is `CodSpeed`'s divan fork (see `Cargo.toml`); with the `codspeed`
+//! feature off it behaves as plain divan, which is the mode `cargo bench` and
+//! `scripts/perf.sh` run. The `codspeed` feature is for the instrumented CI runs, and
+//! withdraws the two things valgrind cannot measure: the wall-clock thresholds, which
+//! remain `scripts/perf.sh`'s responsibility, and the 20k synthetic benchmarks, whose
+//! ~112 MB input costs far more under instrumentation than a runner can spend.
 
-#![expect(
-    clippy::cast_possible_truncation,
-    reason = "benchmark sizes fit in the measured integer types"
-)]
 #![expect(clippy::cast_precision_loss, reason = "throughput calculations intentionally use f64")]
 #![expect(clippy::expect_used, reason = "benchmark setup failures are unrecoverable")]
 
 use std::{
-    collections::BTreeSet,
     fmt::Write as _,
     fs::{self, File},
     io::{self, Read},
@@ -16,6 +18,9 @@ use std::{
     sync::{LazyLock, Mutex, OnceLock},
     time::{Duration, Instant},
 };
+
+#[cfg(not(feature = "codspeed"))]
+use std::collections::BTreeSet;
 
 use cargo_depgate::{
     cli::MetadataSource,
@@ -83,6 +88,7 @@ impl BenchProfile {
             .unwrap_or(Self::Dev)
     }
 
+    #[cfg(not(feature = "codspeed"))]
     const fn parse_gbps(self) -> f64 {
         match self {
             Self::Dev => 0.8,
@@ -95,6 +101,7 @@ impl BenchProfile {
     /// byte -- so the synthetic `parse_gbps` bound does not transfer unexamined.
     /// Measured at 1.188 GB/s on the lemmy fixture (aarch64-apple-darwin, release);
     /// the floor is set at half that, and the ci floor halves it again.
+    #[cfg(not(feature = "codspeed"))]
     const fn real_parse_gbps(self) -> f64 {
         match self {
             Self::Dev => 0.6,
@@ -149,6 +156,7 @@ static REAL_METADATA_TEMP: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
 
 static SYNTHETIC_1K_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| generate_synthetic_json(1_000));
 static SYNTHETIC_5K_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| generate_synthetic_json(5_000));
+#[cfg(not(feature = "codspeed"))]
 static SYNTHETIC_20K_BYTES: LazyLock<Vec<u8>> =
     LazyLock::new(|| generate_synthetic_json(SYNTHETIC_MAX_PACKAGES));
 
@@ -156,6 +164,7 @@ static SYNTHETIC_1K_META: LazyLock<Meta<'static>> =
     LazyLock::new(|| parse_synthetic(&SYNTHETIC_1K_BYTES).expect("parse 1k synthetic metadata"));
 static SYNTHETIC_5K_META: LazyLock<Meta<'static>> =
     LazyLock::new(|| parse_synthetic(&SYNTHETIC_5K_BYTES).expect("parse 5k synthetic metadata"));
+#[cfg(not(feature = "codspeed"))]
 static SYNTHETIC_20K_META: LazyLock<Meta<'static>> =
     LazyLock::new(|| parse_synthetic(&SYNTHETIC_20K_BYTES).expect("parse 20k synthetic metadata"));
 
@@ -163,6 +172,7 @@ static SYNTHETIC_1K_GRAPH: LazyLock<Graph<'static>> =
     LazyLock::new(|| Graph::build(&SYNTHETIC_1K_META).expect("build 1k synthetic graph"));
 static SYNTHETIC_5K_GRAPH: LazyLock<Graph<'static>> =
     LazyLock::new(|| Graph::build(&SYNTHETIC_5K_META).expect("build 5k synthetic graph"));
+#[cfg(not(feature = "codspeed"))]
 static SYNTHETIC_20K_GRAPH: LazyLock<Graph<'static>> =
     LazyLock::new(|| Graph::build(&SYNTHETIC_20K_META).expect("build 20k synthetic graph"));
 
@@ -170,6 +180,7 @@ static SYNTHETIC_1K_CONFIG: LazyLock<Config> =
     LazyLock::new(|| synthetic_config(&SYNTHETIC_1K_GRAPH, synthetic_root_count(1_000)));
 static SYNTHETIC_5K_CONFIG: LazyLock<Config> =
     LazyLock::new(|| synthetic_config(&SYNTHETIC_5K_GRAPH, synthetic_root_count(5_000)));
+#[cfg(not(feature = "codspeed"))]
 static SYNTHETIC_20K_CONFIG: LazyLock<Config> =
     LazyLock::new(|| synthetic_config(&SYNTHETIC_20K_GRAPH, SYNTHETIC_ROOTS_AT_MAX));
 
@@ -179,6 +190,7 @@ static SYNTHETIC_1K_PIPELINE_TEMP: LazyLock<tempfile::TempDir> = LazyLock::new(|
 static SYNTHETIC_5K_PIPELINE_TEMP: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
     synthetic_pipeline_temp(&SYNTHETIC_5K_BYTES, &SYNTHETIC_5K_GRAPH, synthetic_root_count(5_000))
 });
+#[cfg(not(feature = "codspeed"))]
 static SYNTHETIC_20K_PIPELINE_TEMP: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
     synthetic_pipeline_temp(&SYNTHETIC_20K_BYTES, &SYNTHETIC_20K_GRAPH, SYNTHETIC_ROOTS_AT_MAX)
 });
@@ -189,6 +201,7 @@ static SYNTHETIC_1K_REPORT_OUTCOME: LazyLock<pipeline::Outcome> = LazyLock::new(
 static SYNTHETIC_5K_REPORT_OUTCOME: LazyLock<pipeline::Outcome> = LazyLock::new(|| {
     synthetic_report_outcome(&SYNTHETIC_5K_PIPELINE_TEMP, synthetic_root_count(5_000))
 });
+#[cfg(not(feature = "codspeed"))]
 static SYNTHETIC_20K_REPORT_OUTCOME: LazyLock<pipeline::Outcome> = LazyLock::new(|| {
     synthetic_report_outcome(&SYNTHETIC_20K_PIPELINE_TEMP, SYNTHETIC_ROOTS_AT_MAX)
 });
@@ -197,11 +210,14 @@ static SYNTHETIC_1K_RENDER_CONTEXT: LazyLock<RenderContext> =
     LazyLock::new(|| synthetic_render_context(&SYNTHETIC_1K_PIPELINE_TEMP));
 static SYNTHETIC_5K_RENDER_CONTEXT: LazyLock<RenderContext> =
     LazyLock::new(|| synthetic_render_context(&SYNTHETIC_5K_PIPELINE_TEMP));
+#[cfg(not(feature = "codspeed"))]
 static SYNTHETIC_20K_RENDER_CONTEXT: LazyLock<RenderContext> =
     LazyLock::new(|| synthetic_render_context(&SYNTHETIC_20K_PIPELINE_TEMP));
 
 static REAL_VALIDATED: OnceLock<()> = OnceLock::new();
+#[cfg(not(feature = "codspeed"))]
 static REAL_PARSE_RATE_PRINTED: OnceLock<()> = OnceLock::new();
+#[cfg(not(feature = "codspeed"))]
 static SYNTHETIC_20K_VALIDATED: OnceLock<()> = OnceLock::new();
 static PARSE_RATES: LazyLock<Mutex<[Option<f64>; 3]>> =
     LazyLock::new(|| Mutex::new([None, None, None]));
@@ -218,20 +234,25 @@ fn real_parse(bencher: Bencher) {
         black_box(serde_json::from_slice::<Meta<'static>>(bytes).expect("parse hermetic metadata"));
         samples.push(started.elapsed());
     });
-    let elapsed = median_duration(&mut samples);
-    let rate = bytes.len() as f64 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE) / 1e9;
-    let floor = PROFILE.real_parse_gbps();
-    if REAL_PARSE_RATE_PRINTED.set(()).is_ok() {
-        eprintln!(
-            "achieved real-fixture parse GB/s ({} profile): {rate:.3} (floor {floor:.3})",
+    // Elapsed time under CodSpeed's instrumentation measures valgrind, not the parse, so
+    // the floor would fail on every run. CodSpeed compares instruction counts instead.
+    #[cfg(not(feature = "codspeed"))]
+    {
+        let elapsed = median_duration(&mut samples);
+        let rate = bytes.len() as f64 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE) / 1e9;
+        let floor = PROFILE.real_parse_gbps();
+        if REAL_PARSE_RATE_PRINTED.set(()).is_ok() {
+            eprintln!(
+                "achieved real-fixture parse GB/s ({} profile): {rate:.3} (floor {floor:.3})",
+                PROFILE.label()
+            );
+        }
+        assert!(
+            rate >= floor,
+            "real-fixture parse rate {rate:.3} GB/s below the {} floor {floor:.3} GB/s",
             PROFILE.label()
         );
     }
-    assert!(
-        rate >= floor,
-        "real-fixture parse rate {rate:.3} GB/s below the {} floor {floor:.3} GB/s",
-        PROFILE.label()
-    );
 }
 
 #[divan::bench(sample_count = 5, sample_size = 1)]
@@ -283,6 +304,7 @@ fn synthetic_parse_5k(bencher: Bencher) {
     synthetic_parse_bench(bencher, &SYNTHETIC_5K_BYTES, 1);
 }
 
+#[cfg(not(feature = "codspeed"))]
 #[divan::bench(sample_count = 5, sample_size = 1)]
 fn synthetic_parse_20k(bencher: Bencher) {
     ensure_synthetic_20k_validated();
@@ -323,6 +345,7 @@ fn synthetic_graph_rules_5k(bencher: Bencher) {
     );
 }
 
+#[cfg(not(feature = "codspeed"))]
 #[divan::bench(sample_count = 5, sample_size = 1)]
 fn synthetic_graph_rules_20k(bencher: Bencher) {
     ensure_synthetic_20k_validated();
@@ -456,6 +479,11 @@ fn ensure_real_fixture_validated() {
     });
 }
 
+#[cfg(not(feature = "codspeed"))]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "benchmark sizes fit in the measured integer types"
+)]
 fn ensure_synthetic_20k_validated() {
     SYNTHETIC_20K_VALIDATED.get_or_init(|| {
         let bytes = &*SYNTHETIC_20K_BYTES;
@@ -493,6 +521,7 @@ fn ensure_synthetic_20k_validated() {
     });
 }
 
+#[cfg(not(feature = "codspeed"))]
 fn parse_ceiling_ms(bytes: usize, profile: BenchProfile) -> f64 {
     bytes as f64 / (profile.parse_gbps() * 1_000_000.0)
 }
