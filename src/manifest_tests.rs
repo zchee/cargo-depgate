@@ -464,6 +464,37 @@ fn a_parse_error_in_the_second_member_aborts_after_the_first_scanned() {
     assert!(matches!(&error, Error::ManifestParse { path, .. } if path == &bad), "{error:?}");
 }
 
+/// The hint the answer drives suggests centralising versions in the root, so a root that
+/// declares `[workspace.dependencies]` and leaves it empty centralises nothing and has to
+/// read as absent; only a table with entries in it withholds the hint.
+#[test]
+fn only_a_populated_workspace_dependencies_table_counts_as_present() {
+    let temp = tempdir().expect("temporary workspace should be creatable");
+    let cases = [
+        ("none", "[workspace]\nmembers = [\"crates/*\"]\n", Some(false)),
+        (
+            "empty",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\n",
+            Some(false),
+        ),
+        (
+            "populated",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nx = \"1\"\n",
+            Some(true),
+        ),
+        ("no-workspace", "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n", Some(false)),
+        ("unparsable", "not toml at all = = =\n", None),
+    ];
+
+    for (label, text, expected) in cases {
+        let manifest = temp.path().join(label).join("Cargo.toml");
+        write(&manifest, text);
+        assert_eq!(root_workspace_dependencies(&manifest), expected, "case {label}");
+    }
+
+    assert_eq!(root_workspace_dependencies(&temp.path().join("absent/Cargo.toml")), None);
+}
+
 fn write(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().expect("manifest paths have a parent"))
         .expect("manifest directory should be creatable");

@@ -128,11 +128,15 @@ pub struct ManifestReport {
     /// Every offending entry, in member order and then in source order.
     pub entries: Vec<ManifestViolation>,
     /// The number of member manifests read and parsed.
+    ///
+    /// Members only: the pipeline's separate read of the workspace-owning manifest for
+    /// [`Self::root_workspace_dependencies`] is timed in the manifest phase but counted in
+    /// neither this nor [`Self::bytes_scanned`].
     pub manifests_scanned: u32,
-    /// The total size of the manifests read, in bytes.
+    /// The total size of the member manifests read, in bytes.
     pub bytes_scanned: u64,
-    /// Whether the workspace-owning manifest declares a `[workspace.dependencies]` table,
-    /// when that is known.
+    /// Whether the workspace-owning manifest declares a non-empty `[workspace.dependencies]`
+    /// table, when that is known.
     ///
     /// [`check_versions_in_root`] leaves it `None`: it is given member manifests, not the
     /// workspace root. The pipeline fills it in when the rule fails, which is the only case
@@ -207,8 +211,11 @@ pub fn scan_manifest(member: &ManifestInput, text: &str) -> Result<Vec<ManifestV
         .collect())
 }
 
-/// Whether the workspace-owning manifest at `path` declares a `[workspace.dependencies]`
-/// table.
+/// Whether the workspace-owning manifest at `path` declares a non-empty
+/// `[workspace.dependencies]` table.
+///
+/// A table declared and left empty centralises nothing, so it answers `false` alongside a
+/// root that never declared one at all — that is the workspace the hint is aimed at.
 ///
 /// Returns `None` when the manifest cannot be read or parsed. The answer only ever drives an
 /// advisory hint, so an unreadable root is reported as unknown rather than as an absent
@@ -218,11 +225,14 @@ pub fn scan_manifest(member: &ManifestInput, text: &str) -> Result<Vec<ManifestV
 pub fn root_workspace_dependencies(path: &Path) -> Option<bool> {
     let text = fs::read_to_string(path).ok()?;
     let root: RootManifest = toml::from_str(&text).ok()?;
-    Some(root.workspace.is_some_and(|workspace| workspace.dependencies.is_some()))
+    Some(root.workspace.is_some_and(|workspace| {
+        workspace.dependencies.is_some_and(|dependencies| !dependencies.is_empty())
+    }))
 }
 
-/// The single table [`root_workspace_dependencies`] asks about; presence is the whole
-/// question, so the value itself is discarded as it is read.
+/// The single table [`root_workspace_dependencies`] asks about. Only the key count is kept:
+/// each value is discarded as it is read, but a declared-yet-empty table centralises nothing
+/// and so counts as absent, which is where the hint is most deserved.
 #[derive(Deserialize)]
 struct RootManifest {
     #[serde(default)]
@@ -232,7 +242,7 @@ struct RootManifest {
 #[derive(Deserialize)]
 struct RootWorkspace {
     #[serde(default)]
-    dependencies: Option<IgnoredAny>,
+    dependencies: Option<IndexMap<String, IgnoredAny>>,
 }
 
 /// Renders a dependency table path for one of the three tables under `target`.

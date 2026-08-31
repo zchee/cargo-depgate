@@ -16,6 +16,12 @@ set -euo pipefail
 # On --profile ci, and only there, a measurement that reports a FAIL is re-run once
 # at the same bounds and the second result stands; see run_measurement below.
 
+# The script's real standard error, captured before run_measurement starts folding a
+# measurement's stderr into its log with `2>&1`. Diagnostics that must reach the terminal
+# rather than the gate report -- hyperfine's failure dump, for one -- are written to it, so
+# standard output keeps exactly one line per gate.
+exec 3>&2
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly repo_root
 readonly fixture_root="$repo_root/tests/fixtures/lemmy-439734d"
@@ -120,12 +126,16 @@ readonly p1_json="$work_root/p1.json"
 gunzip -c "$fixture_root/metadata.json.gz" >"$metadata_path"
 
 # Retry policy, --profile ci only. The ci bounds are met on shared GitHub runners
-# with the thinnest margins in the suite (own-work 5.94 of 9 ms, AC-P6b 33.7 of
-# 60 ms), where a neighbouring workload on the same host can push an unchanged
-# build past a bound. Re-running the failing measurement once, against the same
-# bounds, separates that from a regression: a regression fails twice. No bound is
-# widened here -- moving one requires a recorded re-derivation in plan §13 -- and
-# the dev profile stays single-shot, where a FAIL is worth looking at directly.
+# with little room to spare -- AC-P6b at 33.7 of 60 ms is the thinnest margin at
+# the bounds in force here -- where a neighbouring workload on the same host can
+# push an unchanged build past a bound. (Own-work read 5.94 of 9 ms in the same
+# run, but that was the pre-lemmy fixture against the then-current 9 ms bound;
+# 867e7c2 moved own_work_bound to 14.5 when the fixture grew to lemmy, so own-work
+# is no longer one of the thin margins.) Re-running the failing measurement once,
+# against the same bounds, separates a flake from a regression: a regression fails
+# twice. No bound is widened here -- moving one requires a recorded re-derivation
+# in plan §13 -- and the dev profile stays single-shot, where a FAIL is worth
+# looking at directly.
 #
 # $1 names the measurement, $2 is its log, $3 is the function that performs it and
 # writes its report to standard output. Only the surviving attempt reaches standard
@@ -194,7 +204,7 @@ readonly p1_command
 measure_wall_and_own_work() {
     local p1_mean
     if ! hyperfine -N --warmup 3 --runs "$runs" --export-json "$p1_json" "$p1_command" >"$p1_log" 2>&1; then
-        cat "$p1_log" >&2
+        cat "$p1_log" >&3
         printf 'AC-P1-%s\t0.000\t%s\tFAIL\n' "$profile" "$p1_bound"
         printf 'AC-P2-own-work\t0.000\t%s\tFAIL\n' "$own_work_bound"
         return 1
@@ -210,8 +220,8 @@ if len(results) != 1 or not isinstance(results[0].get("mean"), (int, float)):
 print(float(results[0]["mean"]) * 1_000.0)
 PY
 )"; then
-        cat "$p1_log" >&2
-        printf 'error: unable to parse hyperfine AC-P1 output\n' >&2
+        cat "$p1_log" >&3
+        printf 'error: unable to parse hyperfine AC-P1 output\n' >&3
         printf 'AC-P1-%s\t0.000\t%s\tFAIL\n' "$profile" "$p1_bound"
         printf 'AC-P2-own-work\t0.000\t%s\tFAIL\n' "$own_work_bound"
         return 1

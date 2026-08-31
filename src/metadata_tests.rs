@@ -631,6 +631,24 @@ fn the_bounded_reap_returns_the_status_of_a_child_that_has_already_exited() {
 
 #[cfg(unix)]
 #[test]
+fn the_bounded_reap_survives_a_budget_the_clock_cannot_represent() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .spawn()
+        .expect("the shell should spawn");
+
+    // `--cargo-timeout` is `value_parser!(u64).range(1..)`, so the budget can exceed what
+    // `Instant` can hold; adding it unchecked used to panic and exit 101, outside the
+    // documented exit-code contract.
+    let status = reap_bounded(&mut child, Duration::from_secs(u64::MAX))
+        .expect("waiting on the child should succeed")
+        .expect("a child that has already exited is reaped whatever the budget");
+
+    assert_eq!(status.code(), Some(7));
+}
+
+#[cfg(unix)]
+#[test]
 fn the_bounded_reap_gives_up_on_a_child_that_outlives_its_budget() {
     use std::time::Instant;
 

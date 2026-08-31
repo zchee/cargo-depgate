@@ -41,8 +41,9 @@ set -euo pipefail
 #  5. Update everything that spells the old directory or the old numbers:
 #     tests/cli_tests.rs (the LEMMY/CKB/COREUTILS consts and the per-example
 #     counter assertions), scripts/perf.sh (`fixture_root`, `live_commit`),
-#     .github/workflows/ci.yaml (the `gzip -t` list and ckb's tracked-manifest
-#     count), and the commit and counts quoted in README.md, docs/examples.md
+#     .github/workflows/ci.yaml (the `git ls-files --error-unmatch` fixture list
+#     and ckb's tracked-manifest count -- both appear twice, once per job), and
+#     the commit and counts quoted in README.md, docs/examples.md
 #     and tests/fixtures/<example>.depgate.toml.
 #  6. Refresh the insta snapshots -- INSTA_UPDATE=always cargo nextest run
 #     -E 'binary(cli_tests)', or cargo insta review -- and commit the updated

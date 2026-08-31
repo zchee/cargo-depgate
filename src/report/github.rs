@@ -1,6 +1,6 @@
 //! GitHub Actions error annotations followed by the complete human report.
 
-use std::{io, path::Path};
+use std::{fs, io, path::Path};
 
 use crate::{manifest, rules::Violation};
 
@@ -93,14 +93,40 @@ fn first_witness(violation: &Violation, outcome: &crate::pipeline::Outcome) -> O
 /// differ whenever the workspace lives in a repository subdirectory. When `$GITHUB_WORKSPACE`
 /// is known and contains the workspace root, the path is emitted relative to it; otherwise it
 /// stays relative to the workspace root, which is the only anchor available off Actions.
+///
+/// `cargo metadata` reports a canonical `workspace_root`, so the containment test resolves
+/// both sides first: a `$GITHUB_WORKSPACE` that traverses a symlink or carries a `..` fails a
+/// purely lexical component comparison and would silently fall back to the workspace anchor.
+/// When either side cannot be resolved — a path that does not exist, or one the process
+/// cannot stat — the lexical comparison stands, which is the pre-canonicalisation behaviour.
 fn display_path(path: &Path, workspace_root: &Path, github_workspace: Option<&Path>) -> String {
     if let Some(repository_root) = github_workspace
-        && workspace_root.starts_with(repository_root)
-        && let Ok(relative) = path.strip_prefix(repository_root)
+        && contains(repository_root, workspace_root)
+        && let Some(relative) = strip_prefix_resolved(path, repository_root)
     {
-        return relative.display().to_string();
+        return relative;
     }
     path.strip_prefix(workspace_root).unwrap_or(path).display().to_string()
+}
+
+/// Whether `root` contains `descendant`, comparing the canonical form of both when both
+/// resolve and the paths as written when either does not.
+fn contains(root: &Path, descendant: &Path) -> bool {
+    if let (Ok(root), Ok(descendant)) = (fs::canonicalize(root), fs::canonicalize(descendant)) {
+        return descendant.starts_with(root);
+    }
+    descendant.starts_with(root)
+}
+
+/// Renders `path` relative to `root`, resolving both when possible so that a non-canonical
+/// `root` still anchors the result, and `None` when `path` lies outside `root`.
+fn strip_prefix_resolved(path: &Path, root: &Path) -> Option<String> {
+    if let (Ok(root), Ok(canonical)) = (fs::canonicalize(root), fs::canonicalize(path))
+        && let Ok(relative) = canonical.strip_prefix(root)
+    {
+        return Some(relative.display().to_string());
+    }
+    path.strip_prefix(root).ok().map(|relative| relative.display().to_string())
 }
 
 /// Escapes a GitHub Actions workflow-command message payload.

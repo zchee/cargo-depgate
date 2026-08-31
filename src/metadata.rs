@@ -375,15 +375,24 @@ fn spawn(options: &MetadataOptions) -> Result<MetadataBuffer, Error> {
 /// The poll interval starts at 100 µs and doubles to [`REAP_POLL_MAX`], so a child that has
 /// already exited is reaped without sleeping and one that lingers costs a handful of
 /// `waitpid` calls per second.
+///
+/// The deadline is computed with [`Instant::checked_add`] because `--cargo-timeout` accepts
+/// any `u64` of seconds and `Instant + Duration` panics on overflow. A budget too large for
+/// the platform clock is effectively infinite, so it degrades to polling on rather than to
+/// an exit outside the documented code contract.
 fn reap_bounded(child: &mut Child, budget: Duration) -> io::Result<Option<ExitStatus>> {
-    let deadline = Instant::now() + budget;
+    let deadline = Instant::now().checked_add(budget);
     let mut interval = Duration::from_micros(100);
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
         }
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Ok(None);
+        let remaining = match deadline {
+            Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
+                Some(remaining) => remaining,
+                None => return Ok(None),
+            },
+            None => REAP_POLL_MAX,
         };
         thread::sleep(interval.min(remaining));
         interval = (interval * 2).min(REAP_POLL_MAX);

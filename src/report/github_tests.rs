@@ -225,3 +225,32 @@ fn an_empty_github_workspace_is_treated_as_unset() {
     let annotation = annotation_for("/repo/rust", Some(""));
     assert!(annotation.starts_with("::error file=depgate.toml,line=2,col=7::"), "{annotation}");
 }
+
+/// `cargo metadata` reports a canonical `workspace_root`, so a `$GITHUB_WORKSPACE` that
+/// reaches the same directory through a symlink or a `..` segment fails a lexical
+/// containment test. Both forms have to anchor the annotation at the repository anyway,
+/// or the `file=` quietly reverts to the workspace anchor and points at the wrong place.
+#[cfg(unix)]
+#[test]
+fn a_non_canonical_github_workspace_still_anchors_the_annotation() {
+    let temp = tempfile::tempdir().expect("temporary directory should be creatable");
+    let repository = temp.path().join("repo");
+    let workspace = repository.join("rust");
+    std::fs::create_dir_all(&workspace).expect("the nested workspace should be creatable");
+    std::fs::write(workspace.join("depgate.toml"), "").expect("the manifest should be writable");
+    let symlinked = temp.path().join("link");
+    std::os::unix::fs::symlink(&repository, &symlinked).expect("symlink should be creatable");
+
+    // What cargo hands the pipeline, which is what the lexical comparison was measured against.
+    let canonical = std::fs::canonicalize(&workspace).expect("the workspace resolves");
+    let workspace_root = canonical.to_str().expect("temporary paths are UTF-8");
+
+    for repository_root in [symlinked, repository.join("rust/..")] {
+        let root = repository_root.to_str().expect("temporary paths are UTF-8");
+        let annotation = annotation_for(workspace_root, Some(root));
+        assert!(
+            annotation.starts_with("::error file=rust/depgate.toml,line=2,col=7::"),
+            "{root}: {annotation}"
+        );
+    }
+}
