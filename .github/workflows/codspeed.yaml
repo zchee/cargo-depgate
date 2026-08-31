@@ -1,0 +1,40 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      # What this measures: the shipped pipeline over the committed lemmy fixture -- JSON
+      # parse, graph build, rule evaluation, and a whole `check` run -- plus the 1k and 5k
+      # synthetic graphs. CodSpeed compares simulated CPU work between commits, so a
+      # dependency-graph regression surfaces as an instruction-count delta on the pull
+      # request rather than as a threshold failure.
+      #
+      # `--features codspeed` swaps the bench harness onto CodSpeed's divan fork and drops
+      # the two things valgrind cannot measure: the wall-clock floors, which remain
+      # scripts/perf.sh's job, and the 20k benchmarks, whose ~112 MB input is far too large
+      # to simulate. The benches only ever parse committed fixtures; nothing here compiles
+      # an inspected workspace.
+      - run: cargo codspeed build --locked --features codspeed --bench pipeline
+      - uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run --bench pipeline
+          # Consumed only for private repositories; public runs authenticate through the
+          # CodSpeed GitHub app, and an unset secret expands to an empty, unused input.
+          token: ${{ secrets.CODSPEED_TOKEN }}
