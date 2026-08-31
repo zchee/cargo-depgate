@@ -144,6 +144,11 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
         let path = config::discover(Path::new(meta.workspace_root.as_ref()));
         config::load(&path)?
     };
+    // Before any key of `raw` is read: `[graph].platform` is needed to build the graph, and the
+    // graph is needed to validate the file, so a discovered file would otherwise be diagnosed by
+    // a value whose meaning a future schema is free to change. The gate keeps the two paths
+    // saying the same thing about the same file.
+    config::check_schema(&raw).map_err(configuration_error)?;
     let platform = effective_platform(args.platform.as_ref(), &raw)?;
     let graph = timings.measure(Phase::Graph, || Graph::build_for_platforms(&meta, &platform))?;
     let validated = config::validate(&raw, Some(&graph)).map_err(configuration_error)?;
@@ -229,6 +234,8 @@ pub fn explain(args: &ExplainArgs, stderr: &mut impl Write) -> Result<ExplainOut
         let path = config::discover(Path::new(meta.workspace_root.as_ref()));
         config::load(&path)?
     };
+    // The same schema-before-platform gate as `check`, for the same reason.
+    config::check_schema(&raw).map_err(configuration_error)?;
     let platform = effective_platform(args.platform.as_ref(), &raw)?;
     let graph = Graph::build_for_platforms(&meta, &platform)?;
     // Validation is deliberately retained even though explain does not evaluate rules: it is the

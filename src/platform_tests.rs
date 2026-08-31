@@ -149,22 +149,99 @@ fn an_unknown_target_feature_keeps_the_edge() {
 fn a_predicate_cargo_calls_false_drops_the_edge() {
     let linux = selection(&[LINUX]);
 
-    // Cargo matches a dependency table's `cfg(...)` against `rustc --print cfg`, where none of
-    // these appear, so all of them are false there. `cfg(tracing_unstable)` is the real case:
-    // `tracing-core` gates `valuable` behind it, and cargo does not compile it without an
-    // explicit `--cfg`. Treating a bare flag as unknown instead would leave `valuable` in a
-    // host-filtered lemmy graph that cargo builds without it.
-    assert!(!linux.activates("cfg(tracing_unstable)"));
-    assert!(!linux.activates("cfg(fuzzing)"));
+    // The three cargo settles by documented rule rather than by asking rustc: while it
+    // evaluates a dependency table's `cfg(...)`, none of them is ever set, on any target and
+    // under any flags. Nothing a user can pass makes them true, so calling them false cannot
+    // drop an edge a build compiles. (`feature` is false in cargo too — rust-lang/cargo#7442.)
     assert!(!linux.activates("cfg(test)"));
-    assert!(!linux.activates("cfg(debug_assertions)"));
     assert!(!linux.activates("cfg(proc_macro)"));
     assert!(!linux.activates("cfg(feature = \"std\")"));
-    assert!(!linux.activates("cfg(some_key = \"some value\")"));
 
     // False, not unknown: `not(...)` of it is therefore a confident true.
+    assert!(linux.activates("cfg(not(test))"));
+    assert!(linux.activates("cfg(any(windows, not(feature = \"std\")))"));
+    assert!(!linux.activates("cfg(all(unix, feature = \"std\"))"));
+}
+
+#[test]
+fn a_predicate_rustc_can_print_keeps_the_edge() {
+    let linux = selection(&[LINUX]);
+
+    // Everything cargo settles by *asking rustc* is unknown here, because this process runs no
+    // rustc and reads no RUSTFLAGS. These are not hypothetical: `rustc --print cfg --target
+    // x86_64-unknown-linux-gnu` prints `debug_assertions` on stable 1.98 and adds
+    // `overflow_checks` and `relocation_model="pic"` on a 1.100 nightly, and a probe workspace
+    // confirms cargo compiles exactly those dependencies. Answering `false` for them — as this
+    // evaluator did until the review — drops edges cargo compiles, which is how a `deny` rule
+    // becomes a false pass.
+    assert!(linux.activates("cfg(debug_assertions)"));
+    assert!(linux.activates("cfg(overflow_checks)"));
+    assert!(linux.activates("cfg(relocation_model = \"pic\")"));
+
+    // A key rustc does not print today is kept on the same rule: an allowlist of the ones it
+    // prints would under-report again the moment rustc grows a key.
+    assert!(linux.activates("cfg(some_key = \"some value\")"));
+    assert!(linux.activates("cfg(fuzzing)"));
+
+    // Unknown, not false, so `not(...)` of it stays unknown and keeps the edge as well.
+    assert!(linux.activates("cfg(not(debug_assertions))"));
+    assert!(linux.activates("cfg(all(unix, relocation_model = \"pic\"))"));
+}
+
+#[test]
+fn an_unparseable_target_key_keeps_the_edge_too() {
+    let linux = selection(&[LINUX]);
+
+    // `cfg-expr` demands a value after any `target_*` key and knows a fixed list of them, so
+    // bare `cfg(target_thread_local)` — which a 1.100 nightly really does print, and which a
+    // probe workspace confirms cargo compiles — never reaches the predicate closure: the whole
+    // expression fails to parse, and an unparseable expression keeps its edge. Different route
+    // from the unknown predicates above, same direction, and it is the route every future
+    // `target_*` key rustc adds will take until this crate's parser learns it.
+    assert!(linux.activates("cfg(target_thread_local)"));
+    assert!(linux.activates("cfg(target_has_atomic_primitive_alignment = \"8\")"));
+    assert!(Expression::parse("cfg(target_thread_local)").is_err(), "the premise of this test");
+}
+
+#[test]
+fn a_bare_flag_only_rustflags_could_set_keeps_the_edge() {
+    let linux = selection(&[LINUX]);
+
+    // `tracing-core` gates `valuable` behind `cfg(tracing_unstable)`, which a default build
+    // does not set — so guppy drops that edge and we keep it. That over-report is deliberate
+    // and is pinned as a named exception in the guppy differential: cargo matches against
+    // `rustc --print cfg`, where a `RUSTFLAGS=--cfg tracing_unstable` *does* appear, so a bare
+    // flag is not provably absent from the build being gated. Keeping the edge can only widen
+    // the closure; dropping it could hide a `deny` finding.
+    assert!(linux.activates("cfg(tracing_unstable)"));
     assert!(linux.activates("cfg(not(tracing_unstable))"));
     assert!(linux.activates("cfg(any(unix, tracing_unstable))"));
+    assert!(!linux.activates("cfg(all(windows, tracing_unstable))"));
+}
+
+#[test]
+fn an_unresolvable_host_names_the_triple_it_resolved_to() {
+    // The host is whatever `rustc -vV` reported, so telling this writer that `host` is one of
+    // the expected values would be advising them to repeat what just failed. The resolver is
+    // asked against an injected triple rather than the real host: a test that needed a machine
+    // whose triple `cfg-expr` has never heard of could not run anywhere.
+    let error =
+        PlatformSelection::resolve_against_host(&tokens(&["host"]), "x86_64-unknown-nonesuch-elf")
+            .expect_err("a host outside the built-in target table must not resolve");
+
+    assert_eq!(error.index, 0);
+    assert_eq!(error.value, "host");
+    assert_eq!(
+        error.to_string(),
+        "`host` resolved to `x86_64-unknown-nonesuch-elf`, which is not in rustc's built-in \
+         target table"
+    );
+
+    // A triple that is merely misspelt keeps the other wording, which does name `host`.
+    let misspelt = PlatformSelection::resolve(&tokens(&["x86_64-unknown-nonesuch-elf"]))
+        .expect_err("an unknown triple must not resolve");
+    assert_eq!(misspelt.host_triple, None);
+    assert!(misspelt.to_string().contains("expected `all`, `host`, or a target triple"));
 }
 
 #[test]

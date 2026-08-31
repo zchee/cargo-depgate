@@ -23,18 +23,34 @@
 //! # What each predicate evaluates to
 //!
 //! A `cfg(...)` in a dependency table can name more than the target: `cfg(test)`,
-//! `cfg(feature = "x")`, a bare `cfg(fuzzing)`. Cargo settles all of those the same way — it
-//! matches the expression against `rustc --print cfg` for the target, where none of them
-//! appear — so this evaluator follows cargo rather than inventing a rule:
+//! `cfg(feature = "x")`, a bare `cfg(fuzzing)`. Cargo settles all of those by matching the
+//! expression against the `rustc --print cfg` output for the target — which carries whatever
+//! *that* rustc emits, plus whatever `--cfg` the build's `RUSTFLAGS` add. This process runs no
+//! rustc and reads no `RUSTFLAGS`, so it has exactly two honest answers, and "the target table
+//! cannot answer it" is one of them:
 //!
 //! * `target_arch`, `target_os`, `target_env`, `target_family`, `target_vendor`,
 //!   `target_endian`, `target_pointer_width`, `target_has_atomic`, `panic`, and the bare
 //!   `unix` / `windows` families come straight from the built-in target table.
-//! * `test`, `debug_assertions`, `proc_macro`, `feature = "..."`, a bare flag, and any other
-//!   `key = "value"` are **false**, exactly as cargo evaluates them in a dependency table.
+//! * `test`, `proc_macro` and `feature = "..."` are **false**: cargo documents these as never
+//!   set when it evaluates a dependency table's `cfg`, whatever the target or the flags.
 //!   (`feature` is false in cargo too — rust-lang/cargo#7442.)
-//! * `target_feature = "..."` is **unknown**: which features a build enables depends on flags
-//!   this process cannot see, and guessing either way would be a fabrication.
+//! * Everything else is **unknown**, so its edge is kept: `debug_assertions`, a bare flag such
+//!   as `cfg(overflow_checks)` or `cfg(tracing_unstable)`, a `key = "value"` outside the target
+//!   table such as `cfg(relocation_model = "pic")`, and `target_feature = "..."`, whose enabled
+//!   set depends on build flags rather than on the target. These are not hypothetical:
+//!   `rustc --print cfg --target x86_64-unknown-linux-gnu` prints `debug_assertions` on every
+//!   stable release and adds `overflow_checks` and `relocation_model="pic"` on a current
+//!   nightly, and a `RUSTFLAGS=--cfg tracing_unstable` can add any bare flag at all.
+//! * A `target_*` key this crate's parser does not know — including bare `cfg(target_thread_local)`,
+//!   which another rustc release may well print — is not a predicate at all: `cfg-expr` rejects
+//!   the whole expression, and an unparseable expression keeps its edge. Different route, same
+//!   direction.
+//!
+//! Answering *false* for any of those would drop an edge cargo compiles. Enumerating the ones
+//! rustc emits today would only move the failure to the next release that adds a key, so the
+//! rule is the other way round: only what is provably false is false, and under-reporting is
+//! structurally impossible rather than merely unobserved.
 //!
 //! # Widening, never narrowing, on what is genuinely unknown
 //!
@@ -44,6 +60,12 @@
 //! comes out unknown is **kept**, and so is one whose expression will not even parse. Keeping
 //! an edge widens the closure, and a wider closure cannot hide a `deny` finding; dropping one
 //! could, which is the single worst failure this tool can produce.
+//!
+//! The cost of that rule is over-reporting, and it is real: `tracing-core` gates `valuable`
+//! behind a bare `cfg(tracing_unstable)`, so a `--platform host` run keeps `valuable` while a
+//! default `cargo build` does not compile it. That is the direction a gate is allowed to be
+//! wrong in, and `graph_tests` pins it as a named exception against guppy rather than letting
+//! it drift.
 
 use std::{fmt, process::Command, sync::OnceLock};
 
@@ -75,10 +97,24 @@ pub struct UnknownPlatform {
     pub index: usize,
     /// The value as it was written.
     pub value: String,
+    /// The triple `host` resolved to, when `value` is `host` and rustc's built-in target table
+    /// does not carry that triple; `None` when the value named a triple itself.
+    ///
+    /// The two failures need different words. A misspelt triple is the writer's to fix; a
+    /// `host` this table cannot answer is not — the machine reported a triple `cfg-expr`'s
+    /// snapshot of rustc's target list has never heard of — and telling that writer to use
+    /// `host` instead would be advising them to repeat what just failed.
+    pub host_triple: Option<String>,
 }
 
 impl fmt::Display for UnknownPlatform {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(triple) = &self.host_triple {
+            return write!(
+                formatter,
+                "`host` resolved to `{triple}`, which is not in rustc's built-in target table"
+            );
+        }
         write!(
             formatter,
             "unknown target platform `{}`; expected `all`, `host`, or a target triple rustc \
@@ -110,16 +146,27 @@ impl PlatformSelection {
     ///
     /// Returns [`UnknownPlatform`] for the first token that is neither `all`, `host`, nor a
     /// triple in rustc's built-in target table, carrying its index so the caller can anchor a
-    /// diagnostic at the value that caused it.
+    /// diagnostic at the value that caused it. A `host` that resolves to a triple the table
+    /// does not carry fails here too, naming the resolved triple rather than the word.
     pub fn resolve(tokens: &[String]) -> Result<Self, UnknownPlatform> {
+        Self::resolve_against_host(tokens, host_triple())
+    }
+
+    /// [`PlatformSelection::resolve`] with the triple `host` stands for passed in, so a `host`
+    /// the built-in target table cannot answer is testable without a rustc that reports one.
+    fn resolve_against_host(tokens: &[String], host: &str) -> Result<Self, UnknownPlatform> {
         let mut targets: Vec<&'static TargetInfo> = Vec::with_capacity(tokens.len());
         for (index, token) in tokens.iter().enumerate() {
             if token == ALL {
                 return Ok(Self::all());
             }
-            let triple = if token == HOST { host_triple() } else { token.as_str() };
-            let target = get_builtin_target_by_triple(triple)
-                .ok_or_else(|| UnknownPlatform { index, value: token.clone() })?;
+            let is_host = token == HOST;
+            let triple = if is_host { host } else { token.as_str() };
+            let target = get_builtin_target_by_triple(triple).ok_or_else(|| UnknownPlatform {
+                index,
+                value: token.clone(),
+                host_triple: is_host.then(|| triple.to_owned()),
+            })?;
             if !targets.contains(&target) {
                 targets.push(target);
             }
@@ -160,16 +207,19 @@ impl PlatformSelection {
         self.targets.iter().any(|selected| {
             let verdict: Option<bool> = expression.eval(|predicate| match predicate {
                 Predicate::Target(target) => Some(target.matches(*selected)),
-                // The one genuinely undecidable predicate: enabled target features depend on
-                // build flags, not on the target.
-                Predicate::TargetFeature(_) => None,
-                // Everything else is false in a dependency table, the way cargo evaluates it.
-                Predicate::Test
-                | Predicate::DebugAssertions
-                | Predicate::ProcMacro
-                | Predicate::Feature(_)
+                // The three cargo settles for us: never set while it evaluates a dependency
+                // table's cfg, on any target and under any flags.
+                Predicate::Test | Predicate::ProcMacro | Predicate::Feature(_) => Some(false),
+                // Everything else is unknown, so the edge is kept. `cfg-expr` routes every key
+                // the built-in target table answers into `Predicate::Target`, so a `KeyValue`
+                // reaching this arm is by construction one the table cannot answer — today
+                // `relocation_model = "pic"`, tomorrow whatever rustc adds next. A bare flag
+                // and `debug_assertions` are the same story with a shorter spelling, and any
+                // of them can also arrive from a `RUSTFLAGS=--cfg ...` this process never sees.
+                Predicate::DebugAssertions
+                | Predicate::TargetFeature(_)
                 | Predicate::Flag(_)
-                | Predicate::KeyValue { .. } => Some(false),
+                | Predicate::KeyValue { .. } => None,
             });
             verdict != Some(false)
         })

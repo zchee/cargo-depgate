@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: graph.platform: unknown target platform `hosts`; expected `all`, `host`, or a target triple rustc knows (see `rustc --print target-list`)
+ --> <ROOT>/tests/fixtures/ws-config-errors/platform-unknown-name.toml:4:12
+  |
+4 | platform = "hosts"
+  |            ^^^^^^^ here

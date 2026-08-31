@@ -273,13 +273,23 @@ cargo depgate check --platform host --platform x86_64-pc-windows-msvc  # the uni
   it works in a **discovered** `depgate.toml`, where a non-default `[graph].features` cannot.
 * `--platform` on the command line overrides `[graph].platform` entirely, exactly as `--features`
   overrides `[graph].features`.
-* Conditions are evaluated the way Cargo evaluates them against `rustc --print cfg`: the
-  `target_*` keys and the bare `unix` / `windows` families come from the target table rustc ships,
-  while `test`, `debug_assertions`, `proc_macro`, `feature = "..."` and any bare flag such as
-  `cfg(tracing_unstable)` are false. `cfg(target_feature = "...")` is the one condition no target
-  table can answer, so its edge is **kept** rather than guessed away — as is an edge whose
-  expression will not parse. Keeping an edge can only widen the closure, and a wider closure
-  cannot hide a `deny` finding.
+* Conditions are evaluated against the target table rustc ships, and only what is *provably*
+  false drops an edge. The `target_*` keys and the bare `unix` / `windows` families are answered
+  from that table. `test`, `proc_macro` and `feature = "..."` are false, because Cargo never sets
+  them while it evaluates a dependency table's `cfg`. **Everything else is unknown and keeps its
+  edge**: `debug_assertions`, a bare flag such as `cfg(tracing_unstable)` or
+  `cfg(overflow_checks)`, a key the target table does not answer such as
+  `cfg(relocation_model = "pic")`, `cfg(target_feature = "...")`, and any expression that will not
+  parse — which includes a bare `cfg(target_thread_local)`. Cargo settles those by matching
+  against `rustc --print cfg`, whose keys grow from release to release (a current nightly prints
+  `overflow_checks`, `relocation_model="pic"` and `target_thread_local` where 1.98 prints none of
+  them) and which also carries whatever `--cfg` your `RUSTFLAGS` add. None of that is visible in
+  a metadata document, so none of it is answered `false`. Keeping an edge can only widen the
+  closure, and a wider closure cannot hide a `deny` finding.
+* The price of that rule is a deliberate over-report against `cargo tree`. `--platform host`
+  keeps `tracing-core`'s `valuable` and `curve25519-dalek`'s `fiat-crypto`, which a default build
+  does not compile, because each sits behind a `cfg` that only a `RUSTFLAGS` `--cfg` sets. Both
+  are pinned as named exceptions in the guppy differential, so the gap cannot grow unnoticed.
 * A platform selection and a `[rules.<package>].features` selection narrow independently and
   compose: the platform filter decides which edges exist, the feature walk decides which of those
   a build turns on.
@@ -459,6 +469,12 @@ Exit codes are 0 for success, 1 for policy violations, 2 for configuration or us
 | `4` | The report, `explain` output, or schema could not be written. A broken pipe is excluded: piping into `head` keeps the policy exit code. |
 
 New codes will be added rather than renumbered, because pipelines gate on them.
+
+When a run is broken in more than one way, the configuration is diagnosed first: a discovered
+`depgate.toml` that cannot be loaded, or that names an unsupported schema or an unknown platform,
+is reported as exit 2 even when the metadata document would also have failed the fail-closed
+input check that gives exit 3. The file you can edit is the one named. A `cargo metadata` that
+never produces a document at all is still exit 3, since there is nothing to check without it.
 
 <!-- depgate:ci -->
 

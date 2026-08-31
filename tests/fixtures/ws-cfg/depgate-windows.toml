@@ -1,0 +1,10 @@
+schema = 1
+
+[graph]
+platform = ["x86_64-pc-windows-msvc"]
+
+[manifest]
+versions-in-root = false
+
+[rules.app]
+deny = ["winonly"]

@@ -903,6 +903,28 @@ fn guppy_package_closure(
         .collect()
 }
 
+/// The names the host filter keeps that a default `cargo build` does not compile on this host,
+/// read off the committed document rather than argued from the documentation.
+///
+/// Both are `cfg` keys rustc does not print unless a build asks for them, which is exactly the
+/// class this evaluator answers *unknown* rather than false:
+///
+/// * `tracing-core` declares `valuable` under `[target.'cfg(tracing_unstable)'.dependencies]`,
+///   a bare flag;
+/// * `curve25519-dalek` declares `fiat-crypto` under
+///   `[target.'cfg(curve25519_dalek_backend = "fiat")'.dependencies]`, a `key = "value"` no
+///   target table answers — and one that crate's own README tells you to set through
+///   `RUSTFLAGS`.
+///
+/// Cargo matches such an expression against `rustc --print cfg` for the target, where a
+/// `RUSTFLAGS=--cfg …` *does* appear. guppy models the default build and drops both edges; we
+/// cannot see `RUSTFLAGS`, so neither key is provably absent from the build being gated and we
+/// keep them. The keep over-reports, which can only add findings; answering `false` would drop
+/// edges some builds compile, which is how a `deny` rule becomes a false pass. The lemmy
+/// document happens to carry one example of each, so this list also pins that both arms of the
+/// rule are live.
+const HOST_FILTER_KEEPS_WHAT_A_DEFAULT_BUILD_OMITS: &[&str] = &["fiat-crypto", "valuable"];
+
 #[test]
 fn the_host_filtered_graph_matches_guppys_host_closure_on_every_lemmy_member() {
     // guppy resolves cargo's platform rules for real, so it is the oracle for the filter, and
@@ -911,9 +933,11 @@ fn the_host_filtered_graph_matches_guppys_host_closure_on_every_lemmy_member() {
     // The unfiltered graph is a strict *superset* of this closure — that gap is the
     // platform-conditional widening the default keeps on purpose, and it is asserted below so
     // that a filter which did nothing at all could not pass this test. Under `host` the two
-    // must agree exactly: an equality, not a subset check, so a filter that drifts in either
-    // direction fails here. Dropping an edge guppy keeps would be the dangerous direction —
-    // that is how a `deny` rule turns into a false pass.
+    // must agree up to one declared exception, and the exception is asserted by equality in
+    // both directions rather than excused by a subset check, so a filter that drifts either
+    // way still fails here. Dropping an edge guppy keeps is the dangerous direction — that is
+    // how a `deny` rule turns into a false pass — and stays an unconditional per-member
+    // equality.
     let json = example_document("tests/fixtures/lemmy-439734d");
     let package_graph = PackageGraph::from_json(&json).expect("guppy loads the document");
     let host_spec = PlatformSpec::build_target().expect("the host platform is known");
@@ -930,18 +954,23 @@ fn the_host_filtered_graph_matches_guppys_host_closure_on_every_lemmy_member() {
         "the host filter must actually remove edges from the lemmy graph"
     );
 
+    let excepted: BTreeSet<String> =
+        HOST_FILTER_KEEPS_WHAT_A_DEFAULT_BUILD_OMITS.iter().map(|&name| name.to_owned()).collect();
     let mut narrowed_somewhere = false;
+    let mut ours_only = BTreeSet::new();
     for (index, &member) in host.members().iter().enumerate() {
         let name = host.name(member);
         let id = PackageId::new(host.package(member).id.to_string());
         let theirs = guppy_package_closure(&package_graph, &id, &host_spec);
         let ours = reached_names(&host, member);
 
-        assert_eq!(
-            ours.difference(&theirs).collect::<Vec<_>>(),
-            Vec::<&String>::new(),
-            "{name}: reached on the host filter but not compiled on the host by cargo"
+        let extra: BTreeSet<String> = ours.difference(&theirs).cloned().collect();
+        assert!(
+            extra.is_subset(&excepted),
+            "{name}: reached on the host filter but not compiled on the host by cargo: {:?}",
+            extra.difference(&excepted).collect::<Vec<_>>()
         );
+        ours_only.extend(extra);
         assert_eq!(
             theirs.difference(&ours).collect::<Vec<_>>(),
             Vec::<&String>::new(),
@@ -955,6 +984,11 @@ fn the_host_filtered_graph_matches_guppys_host_closure_on_every_lemmy_member() {
         narrowed_somewhere |= ours.len() < unfiltered.len();
     }
 
+    assert_eq!(
+        ours_only, excepted,
+        "the declared over-report moved: the host filter now keeps a different set of names \
+         than cargo compiles on this host"
+    );
     assert!(
         narrowed_somewhere,
         "at least one lemmy member must reach fewer names once the host filter applies"

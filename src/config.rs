@@ -796,15 +796,34 @@ pub fn validate(cfg: &RawConfig, graph: Option<&Graph<'_>>) -> Result<Validated,
     Ok(validated)
 }
 
-fn phase_a(cfg: &RawConfig) -> Result<Validated, ConfigError> {
+/// Rejects a configuration written for a schema this build does not implement.
+///
+/// This is Phase A's first check, exposed on its own because the pipeline has to read
+/// `[graph].platform` out of a *discovered* file before that file reaches validation: the graph
+/// cannot be built without the selection, and validation needs the graph. Without this gate the
+/// two configuration paths would disagree about what is wrong with the same file — `--config`
+/// would report the schema, a discovered file would report whatever the platform value happens
+/// to look like under a grammar it was never written for.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] anchored at the `schema` value when it is not the version this
+/// build implements.
+pub fn check_schema(cfg: &RawConfig) -> Result<(), ConfigError> {
     let schema = *cfg.schema.get_ref();
-    if schema != CURRENT_SCHEMA {
-        return Err(config_error(
-            cfg,
-            cfg.schema.span().start,
-            format!("unsupported configuration schema {schema}; expected {CURRENT_SCHEMA}"),
-        ));
+    if schema == CURRENT_SCHEMA {
+        return Ok(());
     }
+    Err(config_error(
+        cfg,
+        cfg.schema.span().start,
+        format!("unsupported configuration schema {schema}; expected {CURRENT_SCHEMA}"),
+    ))
+}
+
+fn phase_a(cfg: &RawConfig) -> Result<Validated, ConfigError> {
+    check_schema(cfg)?;
+    let schema = *cfg.schema.get_ref();
 
     let features = feature_selection(cfg, cfg.graph.features.get_ref(), cfg.graph.features.span())?;
     let platform = platform_selection(cfg)?;

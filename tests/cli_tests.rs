@@ -148,6 +148,15 @@ fn fixture_check_with_options(fixture: &Path, options: &[&str], github_actions: 
 }
 
 fn fixture_explain(fixture: &Path, package: &str, dependency: &str) -> Output {
+    fixture_explain_with_options(fixture, package, dependency, &[])
+}
+
+fn fixture_explain_with_options(
+    fixture: &Path,
+    package: &str,
+    dependency: &str,
+    options: &[&str],
+) -> Output {
     let manifest = fixture.join("Cargo.toml");
     let config = fixture.join("depgate.toml");
     depgate()
@@ -156,6 +165,7 @@ fn fixture_explain(fixture: &Path, package: &str, dependency: &str) -> Output {
         .arg("--config")
         .arg(config)
         .arg("--offline")
+        .args(options)
         .output()
         .expect("cargo-depgate should execute the fixture explain")
 }
@@ -1883,6 +1893,97 @@ fn a_configured_platform_narrows_the_graph_and_the_flag_overrides_it() {
         Some(1),
         "--platform all restores the cfg(windows) edge the file dropped: {overridden:?}"
     );
+}
+
+#[test]
+fn explain_answers_the_platform_it_was_given() {
+    // `explain` builds its graph through the same filter `check` does, so the same query has to
+    // change answer with `--platform`. Two fixed triples rather than `host`: the assertion then
+    // means the same thing on every runner, which is what a reachability contract needs.
+    let fixture = repository_root().join("tests/fixtures/ws-cfg");
+
+    let unfiltered = fixture_explain(&fixture, "app", "winonly");
+    assert_eq!(unfiltered.status.code(), Some(0), "explain exits 0 either way: {unfiltered:?}");
+    assert!(
+        cleaned_stdout(&unfiltered).contains("winonly"),
+        "the default keeps every platform's edges: {unfiltered:?}"
+    );
+
+    let windows = fixture_explain_with_options(
+        &fixture,
+        "app",
+        "winonly",
+        &["--platform", "x86_64-pc-windows-msvc"],
+    );
+    assert_eq!(windows.status.code(), Some(0));
+    let witness = cleaned_stdout(&windows);
+    assert!(witness.contains("winonly"), "windows compiles the edge: {windows:?}");
+    assert!(witness.contains("cfg(windows)"), "the surviving edge is still annotated: {witness}");
+
+    let linux = fixture_explain_with_options(
+        &fixture,
+        "app",
+        "winonly",
+        &["--platform", "x86_64-unknown-linux-gnu"],
+    );
+    assert_eq!(linux.status.code(), Some(0), "an unreachable dependency is not an error");
+    assert_eq!(
+        cleaned_stdout(&linux),
+        "not reachable\n",
+        "linux does not compile the cfg(windows) edge: {linux:?}"
+    );
+}
+
+#[test]
+fn a_command_line_triple_replaces_a_configured_triple_rather_than_joining_it() {
+    // The override case a `host`-versus-`all` test cannot catch: both sides name a real triple,
+    // so a union would keep the Windows edge the file selected and the run would still fail.
+    // Replacement means the flag alone decides, and the cfg(windows) edge is gone.
+    let fixture = repository_root().join("tests/fixtures/ws-cfg");
+    let configured = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &fixture.join("depgate-windows.toml"),
+        &["--format", "json"],
+        false,
+    );
+
+    assert_eq!(
+        reported_platform(&configured),
+        Some(vec!["x86_64-pc-windows-msvc".to_owned()]),
+        "the file selects Windows"
+    );
+    assert_eq!(configured.status.code(), Some(1), "Windows compiles winonly: {configured:?}");
+
+    let overridden = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &fixture.join("depgate-windows.toml"),
+        &["--format", "json", "--platform", "x86_64-unknown-linux-gnu"],
+        false,
+    );
+
+    assert_eq!(
+        reported_platform(&overridden),
+        Some(vec!["x86_64-unknown-linux-gnu".to_owned()]),
+        "the flag replaces the configured triple; a union would report both"
+    );
+    assert_eq!(
+        overridden.status.code(),
+        Some(0),
+        "linux drops the cfg(windows) edge, so the deny rule has nothing to match: {overridden:?}"
+    );
+}
+
+#[test]
+fn config_error_platform_unknown_name_snapshot() {
+    let output = config_error_check("platform-unknown-name");
+
+    assert_eq!(output.status.code(), Some(2), "unknown platform name check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
 }
 
 #[test]
