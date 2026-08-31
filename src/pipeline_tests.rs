@@ -724,3 +724,34 @@ fn the_argument_constructors_default_to_a_discovered_configuration() {
     let explain = explain.with_config_path(PathBuf::from("/ws/depgate.toml"));
     assert_eq!(explain.config_path, Some(PathBuf::from("/ws/depgate.toml")));
 }
+
+/// `CheckArgs` is `#[non_exhaustive]`, so a caller outside this crate cannot set `platform` in a
+/// struct literal: without `with_platform` the whole platform selection would be unreachable
+/// downstream, and `--platform` would be a binary-only feature.
+#[test]
+fn check_args_selects_a_platform_only_through_its_builder() {
+    let options = MetadataOptions::default().with_offline(true);
+    let windows = PlatformSelection::resolve(&["x86_64-pc-windows-msvc".to_owned()])
+        .expect("a triple rustc's built-in table carries resolves");
+
+    let deferred = CheckArgs::new(options.clone());
+    assert_eq!(deferred.platform, None, "an unset selection defers to the configuration");
+
+    let narrowed = CheckArgs::new(options).with_platform(windows.clone());
+    assert_eq!(narrowed.platform, Some(windows));
+}
+
+/// The same reachability guarantee for `explain`, which has to answer over the edges `check`
+/// kept: a platform `check` can select but `explain` cannot would make the two disagree.
+#[test]
+fn explain_args_selects_a_platform_only_through_its_builder() {
+    let options = MetadataOptions::default().with_offline(true);
+    let windows = PlatformSelection::resolve(&["x86_64-pc-windows-msvc".to_owned()])
+        .expect("a triple rustc's built-in table carries resolves");
+
+    let deferred = ExplainArgs::new(options.clone(), "app", "dep");
+    assert_eq!(deferred.platform, None, "an unset selection defers to the configuration");
+
+    let narrowed = ExplainArgs::new(options, "app", "dep").with_platform(windows.clone());
+    assert_eq!(narrowed.platform, Some(windows));
+}

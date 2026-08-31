@@ -47,6 +47,17 @@ impl CheckArgs {
         self.config_path = Some(config_path.into());
         self
     }
+
+    /// Narrows the resolve to `platform`, overriding `[graph].platform` the way `--platform` does.
+    ///
+    /// Leaving it unset defers to the configuration, whose own default is every platform. Because
+    /// the struct is `#[non_exhaustive]`, a caller outside this crate cannot set the field in a
+    /// literal, so this method is the only way the platform selection is reachable at all.
+    #[must_use]
+    pub fn with_platform(mut self, platform: PlatformSelection) -> Self {
+        self.platform = Some(platform);
+        self
+    }
 }
 
 /// Inputs for `explain <package> <dependency>`.
@@ -90,6 +101,16 @@ impl ExplainArgs {
     #[must_use]
     pub fn with_config_path(mut self, config_path: impl Into<PathBuf>) -> Self {
         self.config_path = Some(config_path.into());
+        self
+    }
+
+    /// Narrows the resolve to `platform`, with the same meaning as [`CheckArgs::with_platform`],
+    /// so `explain` and `check` answer over the same edges for identical flags.
+    ///
+    /// Leaving it unset defers to the configuration, whose own default is every platform.
+    #[must_use]
+    pub fn with_platform(mut self, platform: PlatformSelection) -> Self {
+        self.platform = Some(platform);
         self
     }
 }
