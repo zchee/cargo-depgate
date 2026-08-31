@@ -101,6 +101,7 @@ direct = ["acme-core", "serde", "tokio"]
 
 [rules.acme-core]
 internal = ["acme-store"]
+require = ["serde"]
 
 [rules.acme-store]
 leaf = true
@@ -117,6 +118,7 @@ sealed = true
 | `[internal].patterns` | list of name globs | `[]` | Extra names counted as internal, e.g. `["acme-*"]`. Together with `members` this is the single definition of "internal", and it is used for membership matching only: the `internal` and `leaf` rules ask of each reached name whether it is in that set. Nothing else reads it — witness paths render identically whether or not a hop is internal. |
 | `[manifest].versions-in-root` | boolean | `true` | Enable the manifest rule described below. |
 | `[rules.<package>].deny` | list of names or globs | unset | Names that must not appear anywhere in the package's closure. The rule's own package name never matches, so a family glob such as `deny = ["acme-*"]` on `rules.acme-app` does not report `acme-app` itself: a self-match is not a dependency finding. |
+| `[rules.<package>].require` | list of names or globs | unset | The dual of `deny`, read on the same closure: every pattern must match at least one name in it, and a failure lists only the patterns that matched nothing. The rule's own package name never satisfies a pattern, so `require` always asks for a dependency. |
 | `[rules.<package>].internal` | list of exact names | unset | The exact set of internal names the closure may contain. The rule's own package name is skipped here too, so it is neither required in the set nor reported as `+extra`. |
 | `[rules.<package>].leaf` | boolean | unset | The closure must contain no internal name at all. Sugar for `internal = []`, and mutually exclusive with it. |
 | `[rules.<package>].direct` | list of exact names | unset | The exact set of resolved depth-one normal dependencies. |
@@ -154,20 +156,22 @@ This is a **superset** of what `cargo tree -p <member> -e normal` shows on one h
 the gap table below measures. The direction matters per rule kind: `deny`, `leaf` and `sealed` ask
 a containment question, so a wider graph can only add findings and never hide one. `internal` and
 `direct` ask an equality question, so a wider graph can report a `+extra` name that a host-rooted,
-package-rooted view would not have shown.
+package-rooted view would not have shown. `require` asks a presence question, which points the
+other way: a wider graph can only satisfy more patterns, never fewer.
 
 ### Rule kinds
 
 | Rule id | Question | Failure direction |
 |---|---|---|
 | `rules.<pkg>.deny` | Does the closure of `<pkg>` contain a name matching any pattern? | containment — widening only adds findings |
+| `rules.<pkg>.require` | Does the closure of `<pkg>` contain a name matching every pattern? | presence — widening can only satisfy more patterns |
 | `rules.<pkg>.internal` | Are the internal names in the closure exactly the declared set? | equality — widening can add `+extra` |
 | `rules.<pkg>.leaf` | Does the closure contain no internal name? | containment |
 | `rules.<pkg>.direct` | Are the resolved depth-one normal dependencies exactly the declared set? | equality on depth-one edges |
 | `rules.<pkg>.sealed` | Is `<pkg>` absent from the closure of every other workspace member? | containment |
 | `manifest.versions-in-root` | Does any member manifest name a dependency version? | not graph-based |
 
-A `deny` entry is an exact name unless it contains `*`, `?` or `[`, in which case it is a glob.
+A `deny` or `require` entry is an exact name unless it contains `*`, `?` or `[`, in which case it is a glob.
 Matching is case-sensitive and `-`/`_` are never normalised, so `deny = ["axum"]` does not match
 `axum-core`; write `axum*` when the ban is meant to cover a family.
 
@@ -319,7 +323,8 @@ The extras come from two families and no others: platform-conditional edges, suc
 on. Both only ever *widen* the closure. Widening is safe for the containment rules — `deny`, `leaf`
 and `sealed` cannot lose a finding to it — and it is the measured risk for the equality rules
 `internal` and `direct`, which can report an `+extra` name that a host-rooted, package-rooted view
-would not have shown. [`docs/examples.md`](docs/examples.md) works three real policies through end
+would not have shown, and for `require`, which a widened closure can satisfy on an edge the build
+never compiles. [`docs/examples.md`](docs/examples.md) works three real policies through end
 to end, including the coreutils case where this widening is the whole story.
 
 <!-- depgate:exit-codes -->

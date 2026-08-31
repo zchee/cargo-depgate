@@ -51,8 +51,13 @@ The other two lines are outside schema 1, and that is the honest limit. L201 ask
 `--no-default-features` switches an optional edge off, but the resolve `cargo metadata` emits is
 workspace-unified: an optional edge that any member activates stays in it, so one member's feature
 selection does not remove it. A `deny` rule therefore fires on
-`lemmy_api_common → lemmy_db_schema → diesel (optional)` however the document was generated. L204 is
-a *positive* assertion, and there is no `require` rule kind. Both are `cargo-depgate-xqh`.
+`lemmy_api_common → lemmy_db_schema → diesel (optional)` however the document was generated.
+
+L204 is a *positive* assertion, which `require = ["extism"]` expresses: it reads the same
+workspace-unified closure `deny` reads, which is the question `cargo tree --all-features -i extism`
+asks as well. It is not in this policy yet because nothing activates `extism` at `439734d`, so the
+rule can only go green once the fixture is regenerated with `--all-features`. Both lines are
+`cargo-depgate-xqh`.
 
 ## ckb — a check that was switched off
 

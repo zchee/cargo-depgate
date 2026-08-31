@@ -189,6 +189,7 @@ fn rules_follow_toml_declaration_order_within_a_package() {
         .filter(|rule| rule.package == "app")
         .map(|rule| match &rule.kind {
             RuleKind::Deny { .. } => "deny",
+            RuleKind::Require(_) => "require",
             RuleKind::Internal(_) => "internal",
             RuleKind::Leaf => "leaf",
             RuleKind::Direct(_) => "direct",
@@ -349,4 +350,82 @@ sealed = true
         validated.config.rules.iter().map(|rule| rule.package.as_str()).collect();
 
     assert_eq!(packages, ["zeta", "alpha", "middle"]);
+}
+
+#[test]
+fn require_splits_exact_and_glob_entries_and_keeps_declaration_order() {
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+require = ["dep", "rat*", "other"]
+"#,
+    );
+    let config = validate(&raw, None).expect("require validates").config;
+    let RuleKind::Require(patterns) = &config.rules[0].kind else {
+        panic!("the rule should be a require rule: {:?}", config.rules[0].kind);
+    };
+
+    assert_eq!(config.rules[0].id, "rules.app.require");
+    assert_eq!(
+        patterns.iter().map(RequirePattern::as_str).collect::<Vec<_>>(),
+        ["dep", "rat*", "other"],
+        "a failure reports the patterns as written, so declaration order is preserved"
+    );
+    assert!(matches!(patterns[0], RequirePattern::Exact(_)));
+    assert!(matches!(patterns[1], RequirePattern::Glob(_)));
+    assert!(matches!(patterns[2], RequirePattern::Exact(_)));
+    assert!(patterns[0].is_match("dep") && !patterns[0].is_match("dep-core"));
+    assert!(patterns[1].is_match("ratatui") && !patterns[1].is_match("tui"));
+}
+
+#[test]
+fn require_reports_an_unterminated_glob_at_its_array_entry() {
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+require = ["ok", "a[b"]
+"#,
+    );
+    let error = validate(&raw, None).expect_err("an unterminated require glob must fail");
+
+    assert_eq!(error.message, "error parsing glob 'a[b': unclosed character class; missing ']'");
+}
+
+#[test]
+fn require_names_that_no_package_carries_are_not_a_configuration_error() {
+    // `require` takes patterns, so an absent name is the rule failing, not the file being
+    // invalid: only the exact-set kinds (`internal`, `direct`) reject unknown names here.
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+require = ["totally-unknown-name"]
+"#,
+    );
+    let graph = synthetic_graph();
+
+    let validated = validate(&raw, Some(&graph)).expect("require reaches graph validation");
+
+    assert_eq!(validated.config.rules.len(), 1);
+    assert!(validated.warnings.is_empty(), "require has no per-run diagnostic");
+}
+
+#[test]
+fn require_and_deny_are_ordered_by_their_declaration_within_a_package() {
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+require = ["dep"]
+deny = ["other"]
+"#,
+    );
+    let validated = validate(&raw, None).expect("mixed rule kinds validate");
+
+    assert_eq!(
+        validated.config.rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+        ["rules.app.require", "rules.app.deny"]
+    );
 }

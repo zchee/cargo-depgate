@@ -55,8 +55,8 @@ fn readme_configuration_example_parses_and_validates() {
     );
 
     // Rule ids are `rules.<package>.<kind>`, so the trailing segment names the kind. The example
-    // is meant to show all five, which is what makes it a reference rather than a sample.
-    for kind in ["deny", "internal", "leaf", "direct", "sealed"] {
+    // is meant to show all six, which is what makes it a reference rather than a sample.
+    for kind in ["deny", "require", "internal", "leaf", "direct", "sealed"] {
         let suffix = format!(".{kind}");
         assert!(
             validated.config.rules.iter().any(|rule| rule.id.ends_with(&suffix)),

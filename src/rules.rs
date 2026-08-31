@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    config::{Config, Rule, RuleKind, Span},
+    config::{Config, RequirePattern, Rule, RuleKind, Span},
     graph::{Graph, Reach, Scratch},
 };
 
@@ -24,20 +24,7 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
 
     let internal_mask = internal_mask(graph, config);
     let groups = group_rules(config);
-    let mut statuses: Vec<RuleStatus> = config
-        .rules
-        .iter()
-        .map(|rule| RuleStatus {
-            id: rule.id.clone(),
-            package: Some(rule.package.clone()),
-            kind: kind_name(&rule.kind),
-            passed: false,
-            matched: 0,
-        })
-        .collect();
-    let mut violation_slots: Vec<Option<Violation>> =
-        (0..config.rules.len()).map(|_| None).collect();
-    let mut matches = 0_u32;
+    let mut results = Results::new(config);
     let mut member_nodes = HashMap::with_capacity(graph.members().len());
     for &node in graph.members() {
         member_nodes.entry(graph.name(node)).or_insert(node);
@@ -53,55 +40,26 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
             // Phase B validation guarantees this lookup. Keep evaluation fail-closed
             // for direct callers that construct Config values by hand.
             for &index in &indices {
-                let result = invariant_failure(&config.rules[index]);
-                record_result(index, result, &mut statuses, &mut violation_slots, &mut matches);
+                results.record(index, invariant_failure(&config.rules[index]));
             }
             continue;
         };
 
         for &index in &indices {
             if let RuleKind::Direct(expected) = &config.rules[index].kind {
-                let result = evaluate_direct(&config.rules[index], graph, root, expected);
-                record_result(index, result, &mut statuses, &mut violation_slots, &mut matches);
+                results.record(index, evaluate_direct(&config.rules[index], graph, root, expected));
             }
         }
 
-        let needs_forward = indices.iter().any(|&index| {
-            matches!(
-                config.rules[index].kind,
-                RuleKind::Deny { .. } | RuleKind::Internal(_) | RuleKind::Leaf
-            )
-        });
-        if needs_forward {
-            let started = Instant::now();
-            let reach = graph.reach(root, scratch);
-            traversal_time += started.elapsed();
-            for &index in &indices {
-                let result = match &config.rules[index].kind {
-                    RuleKind::Deny { exact, globs, .. } => {
-                        evaluate_deny(&config.rules[index], graph, &reach, root, exact, globs)
-                    }
-                    RuleKind::Internal(expected) => evaluate_internal(
-                        &config.rules[index],
-                        graph,
-                        &reach,
-                        root,
-                        &internal_mask,
-                        expected,
-                    ),
-                    RuleKind::Leaf => evaluate_internal(
-                        &config.rules[index],
-                        graph,
-                        &reach,
-                        root,
-                        &internal_mask,
-                        &BTreeSet::new(),
-                    ),
-                    RuleKind::Direct(_) | RuleKind::Sealed => continue,
-                };
-                record_result(index, result, &mut statuses, &mut violation_slots, &mut matches);
-            }
-        }
+        traversal_time += evaluate_closure_rules(
+            graph,
+            config,
+            &indices,
+            root,
+            &internal_mask,
+            scratch,
+            &mut results,
+        );
 
         let needs_reverse =
             indices.iter().any(|&index| matches!(config.rules[index].kind, RuleKind::Sealed));
@@ -112,20 +70,77 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
             for &index in &indices {
                 if matches!(config.rules[index].kind, RuleKind::Sealed) {
                     let result = evaluate_sealed(&config.rules[index], graph, &reverse);
-                    record_result(index, result, &mut statuses, &mut violation_slots, &mut matches);
+                    results.record(index, result);
                 }
             }
         }
     }
 
-    let violations = violation_slots.into_iter().flatten().collect();
     Evaluation {
-        statuses,
-        violations,
-        matches,
+        statuses: results.statuses,
+        violations: results.violations.into_iter().flatten().collect(),
+        matches: results.matches,
         superset_extra_edges: scratch.superset_extra_edges(),
         traversal_time,
     }
+}
+
+/// Evaluates every rule of one group that reads the root's forward closure, running the
+/// single BFS they share, and returns the time spent inside that traversal.
+///
+/// `deny`, `require`, `internal` and `leaf` all ask a question about the same reach, so
+/// they are answered together; `direct` and `sealed` never enter here.
+fn evaluate_closure_rules(
+    graph: &Graph<'_>,
+    config: &Config,
+    indices: &[usize],
+    root: u32,
+    internal_mask: &BTreeSet<u32>,
+    scratch: &mut Scratch,
+    results: &mut Results,
+) -> Duration {
+    let needs_forward = indices.iter().any(|&index| {
+        matches!(
+            config.rules[index].kind,
+            RuleKind::Deny { .. } | RuleKind::Require(_) | RuleKind::Internal(_) | RuleKind::Leaf
+        )
+    });
+    if !needs_forward {
+        return Duration::ZERO;
+    }
+
+    let started = Instant::now();
+    let reach = graph.reach(root, scratch);
+    let traversal_time = started.elapsed();
+    for &index in indices {
+        let result = match &config.rules[index].kind {
+            RuleKind::Deny { exact, globs, .. } => {
+                evaluate_deny(&config.rules[index], graph, &reach, root, exact, globs)
+            }
+            RuleKind::Require(patterns) => {
+                evaluate_require(&config.rules[index], graph, &reach, root, patterns)
+            }
+            RuleKind::Internal(expected) => evaluate_internal(
+                &config.rules[index],
+                graph,
+                &reach,
+                root,
+                internal_mask,
+                expected,
+            ),
+            RuleKind::Leaf => evaluate_internal(
+                &config.rules[index],
+                graph,
+                &reach,
+                root,
+                internal_mask,
+                &BTreeSet::new(),
+            ),
+            RuleKind::Direct(_) | RuleKind::Sealed => continue,
+        };
+        results.record(index, result);
+    }
+    traversal_time
 }
 
 /// The complete result of one rule evaluation pass.
@@ -136,7 +151,7 @@ pub struct Evaluation {
     pub statuses: Vec<RuleStatus>,
     /// The failed rules, in their relative configuration order.
     pub violations: Vec<Violation>,
-    /// The total number of deny, extra, and sealed entries.
+    /// The total number of deny, extra, sealed, and unmatched `require` entries.
     pub matches: u32,
     /// The union of cfg-only and member-optional edges traversed by all BFS runs.
     pub superset_extra_edges: u32,
@@ -154,11 +169,11 @@ pub struct RuleStatus {
     pub id: String,
     /// The workspace package targeted by the rule, or `None` for the manifest rule.
     pub package: Option<String>,
-    /// The rule kind (`deny`, `internal`, `leaf`, `direct`, or `sealed`).
+    /// The rule kind (`deny`, `require`, `internal`, `leaf`, `direct`, or `sealed`).
     pub kind: &'static str,
     /// Whether the rule passed.
     pub passed: bool,
-    /// The number of deny, extra, or sealed entries for this rule.
+    /// The number of deny, extra, sealed, or unmatched `require` entries for this rule.
     pub matched: u32,
 }
 
@@ -170,13 +185,14 @@ pub struct Violation {
     pub rule_id: String,
     /// The workspace package targeted by the failed rule.
     pub package: String,
-    /// The rule kind (`deny`, `internal`, `leaf`, `direct`, or `sealed`).
+    /// The rule kind (`deny`, `require`, `internal`, `leaf`, `direct`, or `sealed`).
     pub kind: &'static str,
     /// Names matched by a deny rule.
     pub matches: Vec<Match>,
     /// Unexpected names found by an exact-set rule.
     pub extra: Vec<Match>,
-    /// Expected names absent from an exact-set rule's actual set.
+    /// Expected names absent from an exact-set rule's actual set, or the `require`
+    /// patterns that matched nothing in the rule's closure.
     pub missing: Vec<String>,
     /// Workspace members that consume a sealed package.
     pub sealed_by: Vec<SealedEntry>,
@@ -231,6 +247,42 @@ struct RuleResult {
     violation: Option<Violation>,
 }
 
+/// The accumulating output of one evaluation pass: one status and one violation slot per
+/// configured rule, indexed by configuration position so results can be recorded in any
+/// order and still be reported in declaration order.
+struct Results {
+    statuses: Vec<RuleStatus>,
+    violations: Vec<Option<Violation>>,
+    matches: u32,
+}
+
+impl Results {
+    fn new(config: &Config) -> Self {
+        Self {
+            statuses: config
+                .rules
+                .iter()
+                .map(|rule| RuleStatus {
+                    id: rule.id.clone(),
+                    package: Some(rule.package.clone()),
+                    kind: kind_name(&rule.kind),
+                    passed: false,
+                    matched: 0,
+                })
+                .collect(),
+            violations: (0..config.rules.len()).map(|_| None).collect(),
+            matches: 0,
+        }
+    }
+
+    fn record(&mut self, index: usize, result: RuleResult) {
+        self.statuses[index].passed = result.passed;
+        self.statuses[index].matched = result.matched;
+        self.matches = self.matches.saturating_add(result.matched);
+        self.violations[index] = result.violation;
+    }
+}
+
 fn group_rules(config: &Config) -> Vec<Vec<usize>> {
     let mut groups = Vec::new();
     let mut by_package = HashMap::<&str, usize>::new();
@@ -266,6 +318,7 @@ fn internal_mask(graph: &Graph<'_>, config: &Config) -> BTreeSet<u32> {
 fn kind_name(kind: &RuleKind) -> &'static str {
     match kind {
         RuleKind::Deny { .. } => "deny",
+        RuleKind::Require(_) => "require",
         RuleKind::Internal(_) => "internal",
         RuleKind::Leaf => "leaf",
         RuleKind::Direct(_) => "direct",
@@ -288,19 +341,6 @@ fn empty_violation(rule: &Rule) -> Violation {
 
 fn invariant_failure(rule: &Rule) -> RuleResult {
     RuleResult { passed: false, matched: 0, violation: Some(empty_violation(rule)) }
-}
-
-fn record_result(
-    index: usize,
-    result: RuleResult,
-    statuses: &mut [RuleStatus],
-    violation_slots: &mut [Option<Violation>],
-    matches: &mut u32,
-) {
-    statuses[index].passed = result.passed;
-    statuses[index].matched = result.matched;
-    *matches = matches.saturating_add(result.matched);
-    violation_slots[index] = result.violation;
 }
 
 fn evaluate_deny(
@@ -336,6 +376,53 @@ fn evaluate_deny(
     let mut violation = empty_violation(rule);
     violation.matches = matches;
     RuleResult { passed: false, matched: match_count, violation: Some(violation) }
+}
+
+/// Evaluates a `require` rule: every pattern must match some name in the closure.
+///
+/// The verdict is taken per pattern rather than per reached name, so the violation can
+/// list exactly the patterns that matched nothing, in declaration order. An exact pattern
+/// resolves through the name table in `O(1)`; a glob scans the reached names and stops at
+/// its first match. Like `deny`, the root's own name is not a candidate.
+fn evaluate_require(
+    rule: &Rule,
+    graph: &Graph<'_>,
+    reach: &Reach<'_, '_>,
+    root: u32,
+    patterns: &[RequirePattern],
+) -> RuleResult {
+    let root_name = graph.name_id(root);
+    let missing = patterns
+        .iter()
+        .filter(|pattern| !is_required_name_reached(graph, reach, root_name, pattern))
+        .map(|pattern| pattern.as_str().to_owned())
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return passed_result();
+    }
+    let matched = count_u32(missing.len());
+    let mut violation = empty_violation(rule);
+    violation.missing = missing;
+    RuleResult { passed: false, matched, violation: Some(violation) }
+}
+
+fn is_required_name_reached(
+    graph: &Graph<'_>,
+    reach: &Reach<'_, '_>,
+    root_name: u32,
+    pattern: &RequirePattern,
+) -> bool {
+    match pattern {
+        RequirePattern::Exact(name) => graph
+            .lookup_name(name)
+            .is_some_and(|name_id| name_id != root_name && reach.contains_name(name_id)),
+        RequirePattern::Glob(_) => reach.names().ones().any(|name_index| {
+            u32::try_from(name_index).is_ok_and(|name_id| {
+                name_id != root_name && pattern.is_match(graph.name_str(name_id))
+            })
+        }),
+    }
 }
 
 fn evaluate_internal(

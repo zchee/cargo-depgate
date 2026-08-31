@@ -12,6 +12,7 @@ versions-in-root = false
 
 [rules."workspace-app"]
 deny = ["openssl", "ring*"]
+require = ["serde"]
 internal = ["workspace-core"]
 direct = ["serde"]
 sealed = true

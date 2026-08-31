@@ -397,3 +397,102 @@ fn matches_counter_sums_deny_extra_and_sealed_entries_and_status_order_is_stable
     assert_eq!(evaluation.statuses[2].matched, 0);
     assert_eq!(evaluation.statuses[3].matched, 1);
 }
+
+/// Builds a `require` rule with the same exact/glob split the configuration loader applies.
+fn require(id: &str, package: &str, values: &[&str]) -> Rule {
+    let patterns = values
+        .iter()
+        .map(|value| {
+            if value.contains(['*', '?', '[']) {
+                let glob = Glob::new(value).expect("glob compiles");
+                RequirePattern::Glob(Box::new(glob.compile_matcher()))
+            } else {
+                RequirePattern::Exact((*value).to_owned())
+            }
+        })
+        .collect();
+    rule(id, package, RuleKind::Require(patterns))
+}
+
+#[test]
+fn require_passes_when_every_exact_and_glob_pattern_matches_the_closure() {
+    let graph = fixture_spec().graph();
+    let config = config(vec![require("rules.a.require", "a", &["mid", "le*", "dual"])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(evaluation.violations.is_empty(), "every pattern matches a reached name");
+    assert!(evaluation.statuses[0].passed);
+    assert_eq!(evaluation.statuses[0].kind, "require");
+    assert_eq!(evaluation.statuses[0].matched, 0);
+    assert_eq!(evaluation.matches, 0);
+}
+
+#[test]
+fn require_reports_only_the_unmatched_patterns_in_declaration_order() {
+    let graph = fixture_spec().graph();
+    let config =
+        config(vec![require("rules.a.require", "a", &["absent", "mid", "no-such-*", "le*"])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    let violation = evaluation.violations.first().expect("require violation");
+    assert_eq!(violation.kind, "require");
+    assert_eq!(
+        violation.missing,
+        ["absent", "no-such-*"],
+        "a partial miss keeps configuration order and never lists the patterns that matched"
+    );
+    assert!(violation.matches.is_empty(), "a matched pattern carries no witness");
+    assert!(violation.extra.is_empty() && violation.sealed_by.is_empty());
+    assert_eq!(evaluation.statuses[0].matched, 2);
+    assert_eq!(evaluation.matches, 2, "unmatched require entries feed the matches counter");
+}
+
+#[test]
+fn require_is_scoped_to_the_closure_not_to_the_whole_graph() {
+    // `b` is a workspace member of the same graph, but nothing under `a` reaches it: the
+    // question `require` asks is about the rule's closure, exactly as `deny` asks it.
+    let graph = fixture_spec().graph();
+    let config = config(vec![require("rules.a.require", "a", &["b"])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert_eq!(evaluation.violations.first().expect("require violation").missing, ["b"]);
+    assert!(graph.lookup_name("b").is_some(), "the name exists, it is just not reachable");
+}
+
+#[test]
+fn require_is_never_satisfied_by_the_rules_own_package() {
+    // The dual of `deny_never_matches_the_rules_own_package`: `require` asks for a
+    // dependency, so the root's own name is not a candidate for either kind.
+    let graph = fixture_spec().graph();
+    let config = config(vec![require("rules.a.require", "a", &["a", "a*"])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert_eq!(evaluation.violations.first().expect("require violation").missing, ["a", "a*"]);
+}
+
+#[test]
+fn require_shares_one_forward_traversal_with_the_other_closure_rules() {
+    let graph = fixture_spec().graph();
+    let config = config(
+        vec![
+            deny("rules.a.deny", "a", &["absent"]),
+            require("rules.a.require", "a", &["mid"]),
+            rule("rules.a.leaf", "a", RuleKind::Leaf),
+        ],
+        &[],
+    );
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(evaluation.violations.is_empty());
+    assert_eq!(scratch.traversals(), 1, "require reuses the group's single forward BFS");
+}

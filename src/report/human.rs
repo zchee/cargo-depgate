@@ -189,7 +189,10 @@ fn render_violation_witnesses(
                 )?;
             }
         }
-        "internal" | "leaf" | "direct" => {
+        // `require` carries only `missing`, so it shares the `-name` rendering and skips the
+        // `+extra` loop on an empty vector. A matched pattern needs no witness: the finding
+        // is the pattern that matched *nothing*.
+        "internal" | "leaf" | "direct" | "require" => {
             for extra in &violation.extra {
                 let witness = render_witness(
                     &violation.package,
@@ -221,6 +224,7 @@ pub(crate) fn violation_label(status: &RuleStatus, violation: Option<&Violation>
         ("internal" | "leaf" | "direct", Some(violation)) => {
             format!("{} extra, {} missing", violation.extra.len(), violation.missing.len())
         }
+        ("require", Some(violation)) => format!("{} missing", violation.missing.len()),
         ("sealed", Some(violation)) => {
             format!("consumed by {} member(s)", violation.sealed_by.len())
         }

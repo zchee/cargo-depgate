@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobMatcher, GlobSet, GlobSetBuilder};
 use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -79,6 +79,17 @@ pub enum RuleKind {
         /// The original values in declaration order.
         raw: Vec<String>,
     },
+    /// Require every pattern to match some name in the closure — the dual of `deny`,
+    /// evaluated on exactly the same closure.
+    ///
+    /// Patterns keep declaration order because a failure reports the ones that matched
+    /// nothing, and they are kept one per entry rather than split into an exact set and
+    /// a glob set: the verdict is per pattern, not per reached name.
+    ///
+    /// The rule's own package name never satisfies a pattern, mirroring [`RuleKind::Deny`]:
+    /// `require = ["acme-*"]` on `rules.acme-app` asks for a *dependency* of that family,
+    /// not for the package the rule is rooted at.
+    Require(Vec<RequirePattern>),
     /// Require the listed names to be internal packages.
     // P5 may move these sets to name-id space (plan §3.2 step 9); string sets are correct today.
     Internal(BTreeSet<String>),
@@ -89,6 +100,40 @@ pub enum RuleKind {
     Direct(BTreeSet<String>),
     /// Require the package's normal dependency set to be sealed.
     Sealed,
+}
+
+/// One `require` entry: an exact package name or a compiled glob over names.
+///
+/// The split follows the same grammar `deny` uses — a value is a glob exactly when it
+/// contains `*`, `?` or `[` — but each entry keeps its own matcher so that a failed rule
+/// can name the patterns that matched nothing.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum RequirePattern {
+    /// A literal package name.
+    Exact(String),
+    /// A glob over package names.
+    Glob(Box<GlobMatcher>),
+}
+
+impl RequirePattern {
+    /// The pattern exactly as it was written in the configuration.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Exact(name) => name,
+            Self::Glob(matcher) => matcher.glob().glob(),
+        }
+    }
+
+    /// Whether `name` satisfies this pattern.
+    #[must_use]
+    pub fn is_match(&self, name: &str) -> bool {
+        match self {
+            Self::Exact(exact) => exact == name,
+            Self::Glob(matcher) => matcher.is_match(name),
+        }
+    }
 }
 
 /// A graph-independent configuration validation error.
@@ -509,6 +554,18 @@ config_types! {
                 type: Option<Vec<String>>
             }
         },
+        require {
+            raw {
+                /// Dependency names or glob patterns the rule's closure must contain.
+                #[serde(default)]
+                type: Option<Spanned<Vec<String>>>
+            }
+            schema {
+                /// Dependency names or glob patterns the rule's closure must contain.
+                #[serde(default)]
+                type: Option<Vec<String>>
+            }
+        },
         internal {
             raw {
                 /// Exact package names required to be internal.
@@ -681,80 +738,7 @@ fn phase_a(cfg: &RawConfig) -> Result<Validated, ConfigError> {
     let mut rules = Vec::new();
 
     for (package, table) in &cfg.rules {
-        let spec = table.get_ref();
-        let mut package_rules = Vec::new();
-        if spec.leaf.as_ref().is_some_and(|value| *value.get_ref()) && spec.internal.is_some() {
-            let span = spec.leaf.as_ref().map_or_else(|| table.span(), Spanned::span);
-            return Err(config_error(
-                cfg,
-                span.start,
-                format!("rules.{package} declares both leaf and internal"),
-            ));
-        }
-        let mut add_rule = |offset, name, kind| {
-            package_rules.push((
-                offset,
-                Rule {
-                    id: format!("rules.{package}.{name}"),
-                    package: package.clone(),
-                    kind,
-                    span: config_span(cfg, offset),
-                },
-            ));
-        };
-
-        if let Some(internal) = &spec.internal {
-            for (index, name) in internal.get_ref().iter().enumerate() {
-                if name == package {
-                    let range = array_entry_range(cfg, internal.span(), index);
-                    return Err(config_error(
-                        cfg,
-                        range.start,
-                        format!(
-                            "rules.{package}.internal cannot contain the rule package itself ({name})"
-                        ),
-                    ));
-                }
-            }
-            let offset = internal.span().start;
-            add_rule(
-                offset,
-                "internal",
-                RuleKind::Internal(internal.get_ref().iter().cloned().collect()),
-            );
-        }
-
-        if let Some(deny) = &spec.deny {
-            let (exact, globs) = compile_deny(cfg, deny.get_ref(), deny.span())?;
-            let offset = deny.span().start;
-            add_rule(offset, "deny", RuleKind::Deny { exact, globs, raw: deny.get_ref().clone() });
-        }
-
-        if let Some(leaf) = &spec.leaf
-            && *leaf.get_ref()
-        {
-            let offset = leaf.span().start;
-            add_rule(offset, "leaf", RuleKind::Leaf);
-        }
-
-        if let Some(direct) = &spec.direct {
-            let offset = direct.span().start;
-            add_rule(
-                offset,
-                "direct",
-                RuleKind::Direct(direct.get_ref().iter().cloned().collect()),
-            );
-        }
-
-        if let Some(sealed) = &spec.sealed
-            && *sealed.get_ref()
-        {
-            let offset = sealed.span().start;
-            add_rule(offset, "sealed", RuleKind::Sealed);
-        }
-
-        package_rules.sort_by_key(|(offset, _)| *offset);
-        rules.extend(package_rules.into_iter().map(|(_, rule)| rule));
+        rules.extend(flatten_package_rules(cfg, package, table)?);
     }
 
     if rules.is_empty() && !*cfg.manifest.versions_in_root.get_ref() {
@@ -774,6 +758,94 @@ fn phase_a(cfg: &RawConfig) -> Result<Validated, ConfigError> {
     })
 }
 
+/// Flattens one `[rules.<package>]` table into rules, in TOML declaration order.
+///
+/// Every kind is collected with the byte offset of its key and sorted afterwards, so the
+/// order the rules are reported in is the order they were written in, whatever order this
+/// function happens to inspect the keys in.
+fn flatten_package_rules(
+    cfg: &RawConfig,
+    package: &str,
+    table: &Spanned<RawRuleSpec>,
+) -> Result<Vec<Rule>, ConfigError> {
+    let spec = table.get_ref();
+    let mut package_rules = Vec::new();
+    if spec.leaf.as_ref().is_some_and(|value| *value.get_ref()) && spec.internal.is_some() {
+        let span = spec.leaf.as_ref().map_or_else(|| table.span(), Spanned::span);
+        return Err(config_error(
+            cfg,
+            span.start,
+            format!("rules.{package} declares both leaf and internal"),
+        ));
+    }
+    let mut add_rule = |offset, name, kind| {
+        package_rules.push((
+            offset,
+            Rule {
+                id: format!("rules.{package}.{name}"),
+                package: package.to_owned(),
+                kind,
+                span: config_span(cfg, offset),
+            },
+        ));
+    };
+
+    if let Some(internal) = &spec.internal {
+        for (index, name) in internal.get_ref().iter().enumerate() {
+            if name == package {
+                let range = array_entry_range(cfg, internal.span(), index);
+                return Err(config_error(
+                    cfg,
+                    range.start,
+                    format!(
+                        "rules.{package}.internal cannot contain the rule package itself ({name})"
+                    ),
+                ));
+            }
+        }
+        let offset = internal.span().start;
+        add_rule(
+            offset,
+            "internal",
+            RuleKind::Internal(internal.get_ref().iter().cloned().collect()),
+        );
+    }
+
+    if let Some(deny) = &spec.deny {
+        let (exact, globs) = compile_deny(cfg, deny.get_ref(), deny.span())?;
+        let offset = deny.span().start;
+        add_rule(offset, "deny", RuleKind::Deny { exact, globs, raw: deny.get_ref().clone() });
+    }
+
+    if let Some(require) = &spec.require {
+        let patterns = compile_require(cfg, require.get_ref(), require.span())?;
+        let offset = require.span().start;
+        add_rule(offset, "require", RuleKind::Require(patterns));
+    }
+
+    if let Some(leaf) = &spec.leaf
+        && *leaf.get_ref()
+    {
+        let offset = leaf.span().start;
+        add_rule(offset, "leaf", RuleKind::Leaf);
+    }
+
+    if let Some(direct) = &spec.direct {
+        let offset = direct.span().start;
+        add_rule(offset, "direct", RuleKind::Direct(direct.get_ref().iter().cloned().collect()));
+    }
+
+    if let Some(sealed) = &spec.sealed
+        && *sealed.get_ref()
+    {
+        let offset = sealed.span().start;
+        add_rule(offset, "sealed", RuleKind::Sealed);
+    }
+
+    package_rules.sort_by_key(|(offset, _)| *offset);
+    Ok(package_rules.into_iter().map(|(_, rule)| rule).collect())
+}
+
 fn phase_b(validated: &mut Validated, graph: &Graph<'_>) -> Result<(), ConfigError> {
     let mut member_nodes = HashMap::with_capacity(graph.members().len());
     for &node in graph.members() {
@@ -790,7 +862,11 @@ fn phase_b(validated: &mut Validated, graph: &Graph<'_>) -> Result<(), ConfigErr
 
         let names = match &rule.kind {
             RuleKind::Internal(names) | RuleKind::Direct(names) => Some(names),
-            RuleKind::Deny { .. } | RuleKind::Leaf | RuleKind::Sealed => None,
+            // `require` takes patterns, not exact names, so a value naming no package in
+            // the resolve is a rule that fails — never a configuration error (as for `deny`).
+            RuleKind::Deny { .. } | RuleKind::Require(_) | RuleKind::Leaf | RuleKind::Sealed => {
+                None
+            }
         };
         if let Some(names) = names {
             for name in names {
@@ -855,6 +931,27 @@ fn compile_patterns(
     builder.build().map_err(|error| config_error(cfg, span.start, error.to_string()))
 }
 
+/// Whether a `deny` or `require` entry is a glob rather than a literal name.
+///
+/// The single definition of the grammar the two rule kinds share, so a value that is a
+/// glob for one is never a literal name for the other.
+fn is_glob(value: &str) -> bool {
+    value.contains(['*', '?', '['])
+}
+
+/// Compiles one entry's glob, anchoring the error at that array entry.
+fn compile_entry_glob(
+    cfg: &RawConfig,
+    value: &str,
+    span: &Range<usize>,
+    index: usize,
+) -> Result<Glob, ConfigError> {
+    Glob::new(value).map_err(|error| {
+        let range = array_entry_range(cfg, span.clone(), index);
+        config_error(cfg, range.start, error.to_string())
+    })
+}
+
 fn compile_deny(
     cfg: &RawConfig,
     raw: &[String],
@@ -863,12 +960,8 @@ fn compile_deny(
     let mut exact = BTreeSet::new();
     let mut builder = GlobSetBuilder::new();
     for (index, value) in raw.iter().enumerate() {
-        if value.contains(['*', '?', '[']) {
-            let glob = Glob::new(value).map_err(|error| {
-                let range = array_entry_range(cfg, span.clone(), index);
-                config_error(cfg, range.start, error.to_string())
-            })?;
-            builder.add(glob);
+        if is_glob(value) {
+            builder.add(compile_entry_glob(cfg, value, &span, index)?);
         } else {
             exact.insert(value.clone());
         }
@@ -876,6 +969,25 @@ fn compile_deny(
     let globs =
         builder.build().map_err(|error| config_error(cfg, span.start, error.to_string()))?;
     Ok((exact, globs))
+}
+
+/// Compiles `require` entries, keeping declaration order and one matcher per entry.
+fn compile_require(
+    cfg: &RawConfig,
+    raw: &[String],
+    span: Range<usize>,
+) -> Result<Vec<RequirePattern>, ConfigError> {
+    raw.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if is_glob(value) {
+                let glob = compile_entry_glob(cfg, value, &span, index)?;
+                Ok(RequirePattern::Glob(Box::new(glob.compile_matcher())))
+            } else {
+                Ok(RequirePattern::Exact(value.clone()))
+            }
+        })
+        .collect()
 }
 
 fn config_error(cfg: &RawConfig, offset: usize, message: impl Into<String>) -> ConfigError {

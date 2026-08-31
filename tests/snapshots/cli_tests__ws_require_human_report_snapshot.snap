@@ -1,0 +1,13 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stdout(&output)
+---
+ok rules.app.require
+error[rules.core.require]: dependency policy violation
+  --> depgate.toml:10:11
+   |
+10 | require = ["ui", "app", "no-such-*"]
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^ 2 missing
+  -app
+  -no-such-*
+FAIL: 2 rules, 1 violations

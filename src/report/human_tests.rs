@@ -317,3 +317,29 @@ fn line_and_character_columns_reconstruct_utf8_byte_offsets() {
     assert_eq!(line_col_to_offset(text, 0, 1), None);
     assert_eq!(line_col_to_offset(text, 1, 0), None);
 }
+
+#[test]
+fn require_lists_its_unmatched_patterns_and_labels_them_as_missing() {
+    let root = Path::new("/workspace");
+    let id = "rules.app.require";
+    let mut violation = graph_violation(root, id, "require");
+    violation.missing = vec!["serde".to_owned(), "tokio-*".to_owned()];
+    let outcome =
+        outcome(root, vec![status(id, Some("app"), "require", false, 2)], vec![violation], None, 1);
+
+    let rendered = render_text(&outcome);
+
+    assert!(rendered.contains("  -serde\n  -tokio-*\n"), "unmatched patterns listed: {rendered}");
+    assert!(!rendered.contains(" → "), "a require finding has no witness path: {rendered}");
+    assert!(rendered.ends_with("FAIL: 1 rules, 1 violations\n"), "{rendered}");
+}
+
+#[test]
+fn require_violation_label_counts_only_the_missing_patterns() {
+    let root = Path::new("/workspace");
+    let mut violation = graph_violation(root, "rules.app.require", "require");
+    violation.missing = vec!["serde".to_owned()];
+    let status = status("rules.app.require", Some("app"), "require", false, 1);
+
+    assert_eq!(violation_label(&status, Some(&violation)), "1 missing");
+}

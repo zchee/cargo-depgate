@@ -128,6 +128,10 @@ impl Example {
     }
 }
 
+fn require_fixture_root() -> PathBuf {
+    repository_root().join("tests/fixtures/ws-require")
+}
+
 fn config_error_fixture_root() -> PathBuf {
     repository_root().join("tests/fixtures/ws-config-errors")
 }
@@ -893,6 +897,101 @@ fn ws_violations_github_report_snapshot() {
     }, {
         insta::assert_snapshot!(cleaned_stdout(&output));
     });
+}
+
+#[test]
+fn ws_require_human_report_snapshot() {
+    let output = fixture_check_with_options(&require_fixture_root(), &["--format", "human"], false);
+
+    assert_eq!(output.status.code(), Some(1), "require human check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_require_json_report_snapshot() {
+    let output = fixture_check_with_options(&require_fixture_root(), &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(1), "require JSON check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_require_github_report_snapshot() {
+    let output = fixture_check_with_options(&require_fixture_root(), &[], true);
+
+    assert_eq!(output.status.code(), Some(1), "require GitHub check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn require_reports_only_the_patterns_that_matched_nothing() {
+    // The pass/fail split of the fixture policy: `rules.app.require` is satisfied by an
+    // exact name and a glob, while `rules.core.require` matches `ui` and misses the other
+    // two — the partial miss is what proves matched patterns are never listed.
+    let output = fixture_check_with_options(&require_fixture_root(), &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(1), "require check failed: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("require report should be JSON");
+    let violations = report["violations"].as_array().expect("report should contain violations");
+    assert_eq!(violations.len(), 1, "the satisfied rule contributes no violation: {violations:?}");
+    let violation = &violations[0];
+
+    assert_eq!(violation["rule_id"], "rules.core.require");
+    assert_eq!(violation["kind"], "require");
+    assert_eq!(violation["package"], "core");
+    assert_eq!(violation["missing"], serde_json::json!(["app", "no-such-*"]));
+    assert_eq!(violation["matches"], serde_json::json!([]), "a matched pattern carries no witness");
+    assert_eq!(violation["extra"], serde_json::json!([]));
+    assert_eq!(report["counters"]["matches"].as_u64(), Some(2));
+}
+
+#[test]
+fn require_is_satisfied_by_a_name_present_only_through_an_optional_edge() {
+    // `require` reads exactly the closure `deny` reads, so an optional dependency that the
+    // selected features activate satisfies it: the same unified closure, the same answer.
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let config_dir = tempfile::tempdir().expect("temporary require config should be creatable");
+    let config = config_dir.path().join("depgate.toml");
+    fs::write(
+        &config,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.app]\nrequire = [\"reqwest-like\"]\n",
+    )
+    .expect("require config should be writable");
+
+    let enabled = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &config,
+        &["--features", "app/net"],
+        false,
+    );
+    assert_eq!(
+        enabled.status.code(),
+        Some(0),
+        "an activated optional edge satisfies require: {enabled:?}"
+    );
+
+    let disabled =
+        check_with_manifest_and_config(Some(&fixture.join("Cargo.toml")), &config, &[], false);
+    assert_eq!(
+        disabled.status.code(),
+        Some(1),
+        "with the feature off the name is absent from the closure: {disabled:?}"
+    );
+    let stdout = cleaned_stdout(&disabled);
+    assert!(stdout.contains("  -reqwest-like"), "the unmatched pattern is listed: {stdout}");
 }
 
 #[test]
