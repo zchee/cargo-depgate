@@ -149,7 +149,22 @@ impl PlatformSelection {
     /// diagnostic at the value that caused it. A `host` that resolves to a triple the table
     /// does not carry fails here too, naming the resolved triple rather than the word.
     pub fn resolve(tokens: &[String]) -> Result<Self, UnknownPlatform> {
-        Self::resolve_against_host(tokens, host_triple())
+        Self::resolve_lazy(tokens, host_triple)
+    }
+
+    /// [`PlatformSelection::resolve`] with the host lookup handed in unevaluated.
+    ///
+    /// The host triple comes from spawning `rustc -vV`, and every selection used to pay for
+    /// that spawn through argument evaluation even when no token was `host` -- on a CI runner
+    /// that is ~30 ms of wall clock and a child whose peak RSS the measurement harness
+    /// attributes to this process. The lookup now runs only when some token actually says
+    /// `host`, and the test suite pins that with a closure that panics if called.
+    fn resolve_lazy(
+        tokens: &[String],
+        host: impl FnOnce() -> &'static str,
+    ) -> Result<Self, UnknownPlatform> {
+        let host = if tokens.iter().any(|token| token == HOST) { host() } else { "" };
+        Self::resolve_against_host(tokens, host)
     }
 
     /// [`PlatformSelection::resolve`] with the triple `host` stands for passed in, so a `host`

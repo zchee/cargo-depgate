@@ -261,3 +261,25 @@ fn an_unparseable_expression_keeps_the_edge() {
     assert!(linux.activates("cfg(unix"), "an unclosed expression must not drop an edge");
     assert!(linux.activates("cfg(!!!)"));
 }
+
+#[test]
+fn a_selection_without_host_never_asks_what_the_host_is() {
+    // The host triple costs a `rustc -vV` spawn, and the perf harness starts a fresh process
+    // per measurement, so an eager lookup taxes every run that never said `host` -- the CI
+    // regression that motivated the lazy split charged ~30 ms and the child's peak RSS to the
+    // default path. The closure stands in for that spawn and fails the test if it runs.
+    let no_host = || -> &'static str { panic!("the host lookup must stay unevaluated") };
+
+    let named = PlatformSelection::resolve_lazy(&tokens(&[LINUX, WINDOWS]), no_host)
+        .expect("plain triples resolve without a host");
+    assert_eq!(named.triples().collect::<Vec<_>>(), vec![LINUX, WINDOWS]);
+
+    let all = PlatformSelection::resolve_lazy(&tokens(&["all"]), no_host)
+        .expect("`all` resolves without a host");
+    assert!(all.is_all());
+
+    // And the lookup still happens when a token does say `host`.
+    let host = PlatformSelection::resolve_lazy(&tokens(&["host"]), || LINUX)
+        .expect("an injected host triple resolves");
+    assert_eq!(host.triples().collect::<Vec<_>>(), vec![LINUX]);
+}
