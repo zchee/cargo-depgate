@@ -1,6 +1,7 @@
 //! Command-line grammar and command dispatch.
 
 use std::{
+    env,
     ffi::OsString,
     io::{self, Write},
     path::PathBuf,
@@ -270,12 +271,15 @@ fn run_check(common: &CommonArgs) -> Result<(), Error> {
     let mut outcome = pipeline::check(&check_args, &mut stderr)?;
 
     let mut stdout = anstream::stdout();
-    let context = RenderContext {
-        workspace_root: outcome.workspace_root.clone(),
-        tool: "cargo-depgate",
-        version: env!("CARGO_PKG_VERSION"),
-        color: stdout.current_choice() != anstream::ColorChoice::Never,
-    };
+    // The environment is read here rather than in the reporter so that the GitHub
+    // annotation anchor is an explicit input a test can supply.
+    let context = RenderContext::new(
+        outcome.workspace_root.clone(),
+        "cargo-depgate",
+        env!("CARGO_PKG_VERSION"),
+        stdout.current_choice() != anstream::ColorChoice::Never,
+    )
+    .with_github_workspace(env::var_os("GITHUB_WORKSPACE").map(PathBuf::from));
     let started = Instant::now();
     let render_result =
         report::render(resolve_format(common.format), &outcome, &context, &mut stdout);

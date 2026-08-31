@@ -47,7 +47,11 @@ assert_cmd = "2.2.2"
 guppy = "0.18.0"
 tempfile = "3"
 insta = { version = "1.48.0", features = ["filters"] }
-divan = "0.1.21"
+# CodSpeed's divan fork, which upstream divan cannot coexist with: both pin `divan-macros`
+# exactly (=0.1.17 vs =0.1.21) inside one 0.1.x compatibility range, so cargo can resolve
+# only one of them. Outside a CodSpeed run the fork falls back to plain divan behaviour,
+# which is what `cargo bench` and scripts/perf.sh measure.
+divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 
 [[bench]]
@@ -56,6 +60,11 @@ harness = false
 # `cargo test` would otherwise run the bench binary as a test target and generate
 # the full 112 MB synthetic input; nextest and CI never do, but a plain `cargo test` would.
 test = false
+
+[features]
+# CI-only. Enabling it drops the wall-clock gates and the 20k stress benches, neither of
+# which survives CodSpeed's valgrind instrumentation; scripts/perf.sh never sets it.
+codspeed = []
 
 [lints.rust]
 unsafe_code = "deny"

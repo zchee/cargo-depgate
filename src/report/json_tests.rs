@@ -102,6 +102,7 @@ fn outcome(features: Option<FeatureSelection>) -> Outcome {
                     dependency: "serde".to_owned(),
                     version: "1".to_owned(),
                     span: span("Cargo.toml", 12),
+                    span_bytes: 3,
                 },
                 ManifestViolation {
                     package: "app".to_owned(),
@@ -109,10 +110,12 @@ fn outcome(features: Option<FeatureSelection>) -> Outcome {
                     dependency: "tempfile".to_owned(),
                     version: "3".to_owned(),
                     span: span("Cargo.toml", 16),
+                    span_bytes: 3,
                 },
             ],
             manifests_scanned: 1,
             bytes_scanned: 128,
+            root_workspace_dependencies: None,
         }),
         warnings: Vec::new(),
         workspace_root: PathBuf::from(WORKSPACE),
@@ -138,12 +141,8 @@ fn outcome(features: Option<FeatureSelection>) -> Outcome {
 
 fn render_outcome(features: Option<FeatureSelection>) -> String {
     let mut bytes = Vec::new();
-    let context = RenderContext {
-        workspace_root: PathBuf::from(WORKSPACE),
-        tool: "cargo-depgate",
-        version: "0.1.0-test",
-        color: false,
-    };
+    let context =
+        RenderContext::new(PathBuf::from(WORKSPACE), "cargo-depgate", "0.1.0-test", false);
     render(&outcome(features), &context, &mut bytes).expect("JSON rendering should succeed");
     String::from_utf8(bytes).expect("JSON output should be UTF-8")
 }

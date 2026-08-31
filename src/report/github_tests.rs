@@ -64,6 +64,7 @@ fn manifest_entry(dependency: &str, line: u32) -> ManifestViolation {
         dependency: dependency.to_owned(),
         version: "1".to_owned(),
         span: span(PathBuf::from(WORKSPACE).join("Cargo.toml"), line),
+        span_bytes: 3,
     }
 }
 
@@ -92,6 +93,7 @@ fn outcome(graph_count: usize, manifest_entries: Vec<ManifestViolation>) -> Outc
             entries: manifest_entries,
             manifests_scanned: 1,
             bytes_scanned: 64,
+            root_workspace_dependencies: None,
         }),
         warnings: Vec::new(),
         workspace_root: PathBuf::from(WORKSPACE),
@@ -105,18 +107,28 @@ fn outcome(graph_count: usize, manifest_entries: Vec<ManifestViolation>) -> Outc
 }
 
 fn context() -> RenderContext {
-    RenderContext {
-        workspace_root: PathBuf::from(WORKSPACE),
-        tool: "cargo-depgate",
-        version: "0.1.0",
-        color: false,
-    }
+    RenderContext::new(PathBuf::from(WORKSPACE), "cargo-depgate", "0.1.0", false)
 }
 
 fn rendered(outcome: &Outcome) -> String {
+    rendered_with(outcome, &context())
+}
+
+fn rendered_with(outcome: &Outcome, ctx: &RenderContext) -> String {
     let mut output = Vec::new();
-    render(outcome, &context(), &mut output).expect("render succeeds");
+    render(outcome, ctx, &mut output).expect("render succeeds");
     String::from_utf8(output).expect("report is UTF-8")
+}
+
+/// One annotation over a workspace rooted at `workspace_root`, rendered with the given
+/// `$GITHUB_WORKSPACE` value.
+fn annotation_for(workspace_root: &str, github_workspace: Option<&str>) -> String {
+    let mut nested = outcome(1, Vec::new());
+    nested.workspace_root = PathBuf::from(workspace_root);
+    nested.violations[0].span.file = PathBuf::from(workspace_root).join("depgate.toml");
+    let ctx = RenderContext::new(PathBuf::from(workspace_root), "cargo-depgate", "0.1.0", false)
+        .with_github_workspace(github_workspace.map(PathBuf::from));
+    rendered_with(&nested, &ctx).lines().next().expect("annotation exists").to_owned()
 }
 
 #[test]
@@ -199,4 +211,54 @@ fn sealed_annotation_matches_the_version_free_human_body_convention() {
         .expect("sealed annotation line exists");
     assert!(annotation_line.contains("— tool → core [cfg(windows)]"), "{annotation_line}");
     assert!(!annotation_line.contains(" v"), "no version marker expected: {annotation_line}");
+}
+
+#[test]
+fn annotation_file_is_relative_to_github_workspace_when_the_workspace_is_nested() {
+    let annotation = annotation_for("/repo/rust", Some("/repo"));
+    assert!(
+        annotation.starts_with("::error file=rust/depgate.toml,line=2,col=7::"),
+        "{annotation}"
+    );
+}
+
+#[test]
+fn annotation_file_keeps_the_workspace_anchor_when_the_workspace_is_outside_github_workspace() {
+    let annotation = annotation_for(WORKSPACE, Some("/repo"));
+    assert!(annotation.starts_with("::error file=depgate.toml,line=2,col=7::"), "{annotation}");
+}
+
+#[test]
+fn an_empty_github_workspace_is_treated_as_unset() {
+    let annotation = annotation_for("/repo/rust", Some(""));
+    assert!(annotation.starts_with("::error file=depgate.toml,line=2,col=7::"), "{annotation}");
+}
+
+/// `cargo metadata` reports a canonical `workspace_root`, so a `$GITHUB_WORKSPACE` that
+/// reaches the same directory through a symlink or a `..` segment fails a lexical
+/// containment test. Both forms have to anchor the annotation at the repository anyway,
+/// or the `file=` quietly reverts to the workspace anchor and points at the wrong place.
+#[cfg(unix)]
+#[test]
+fn a_non_canonical_github_workspace_still_anchors_the_annotation() {
+    let temp = tempfile::tempdir().expect("temporary directory should be creatable");
+    let repository = temp.path().join("repo");
+    let workspace = repository.join("rust");
+    std::fs::create_dir_all(&workspace).expect("the nested workspace should be creatable");
+    std::fs::write(workspace.join("depgate.toml"), "").expect("the manifest should be writable");
+    let symlinked = temp.path().join("link");
+    std::os::unix::fs::symlink(&repository, &symlinked).expect("symlink should be creatable");
+
+    // What cargo hands the pipeline, which is what the lexical comparison was measured against.
+    let canonical = std::fs::canonicalize(&workspace).expect("the workspace resolves");
+    let workspace_root = canonical.to_str().expect("temporary paths are UTF-8");
+
+    for repository_root in [symlinked, repository.join("rust/..")] {
+        let root = repository_root.to_str().expect("temporary paths are UTF-8");
+        let annotation = annotation_for(workspace_root, Some(root));
+        assert!(
+            annotation.starts_with("::error file=rust/depgate.toml,line=2,col=7::"),
+            "{root}: {annotation}"
+        );
+    }
 }

@@ -20,6 +20,7 @@ use crate::{
 
 /// Everything the `check` pipeline needs beyond the command-line grammar.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CheckArgs {
     /// Options controlling `cargo metadata` acquisition and rebasing.
     pub metadata: metadata::MetadataOptions,
@@ -30,8 +31,27 @@ pub struct CheckArgs {
     pub platform: Option<PlatformSelection>,
 }
 
+impl CheckArgs {
+    /// A check whose `depgate.toml` is discovered at the metadata workspace root.
+    #[must_use]
+    pub fn new(metadata: metadata::MetadataOptions) -> Self {
+        Self { metadata, config_path: None, platform: None }
+    }
+
+    /// Loads configuration from `config_path` instead of discovering it.
+    ///
+    /// Only an explicit path can carry `[graph].features` into the `cargo metadata` spawn:
+    /// a discovered file is found after the spawn, so its selection is rejected (§1.3, D12).
+    #[must_use]
+    pub fn with_config_path(mut self, config_path: impl Into<PathBuf>) -> Self {
+        self.config_path = Some(config_path.into());
+        self
+    }
+}
+
 /// Inputs for `explain <package> <dependency>`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ExplainArgs {
     /// Options controlling `cargo metadata` acquisition and rebasing.
     pub metadata: metadata::MetadataOptions,
@@ -44,6 +64,34 @@ pub struct ExplainArgs {
     pub package: String,
     /// The dependency to locate beneath `package`.
     pub dependency: String,
+}
+
+impl ExplainArgs {
+    /// An explanation of why `package` depends on `dependency`, with a discovered configuration.
+    #[must_use]
+    pub fn new(
+        metadata: metadata::MetadataOptions,
+        package: impl Into<String>,
+        dependency: impl Into<String>,
+    ) -> Self {
+        Self {
+            metadata,
+            config_path: None,
+            platform: None,
+            package: package.into(),
+            dependency: dependency.into(),
+        }
+    }
+
+    /// Loads configuration from `config_path` instead of discovering it.
+    ///
+    /// Carries the same Phase-A meaning as [`CheckArgs::with_config_path`], so `explain` and
+    /// `check` see the same configuration for identical flags.
+    #[must_use]
+    pub fn with_config_path(mut self, config_path: impl Into<PathBuf>) -> Self {
+        self.config_path = Some(config_path.into());
+        self
+    }
 }
 
 /// The result of `explain`.
@@ -171,8 +219,17 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
             .members()
             .iter()
             .map(|&node| ManifestInput::new(graph.name(node), graph.manifest_path(node)));
-        let report =
-            timings.measure(Phase::Manifest, || manifest::check_versions_in_root(members))?;
+        let root_manifest = Path::new(meta.workspace_root.as_ref()).join("Cargo.toml");
+        let report = timings.measure(Phase::Manifest, || {
+            let mut report = manifest::check_versions_in_root(members)?;
+            // Only a failing rule asks the reader to do anything, so the extra read of the
+            // workspace-owning manifest stays off the passing path.
+            if !report.passed() {
+                report.root_workspace_dependencies =
+                    manifest::root_workspace_dependencies(&root_manifest);
+            }
+            Ok::<_, Error>(report)
+        })?;
         evaluation.statuses.push(manifest_status(&report));
         Some(report)
     } else {

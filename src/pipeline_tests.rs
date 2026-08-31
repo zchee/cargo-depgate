@@ -388,6 +388,37 @@ fn manifest_entries_fail_the_rule_once_after_the_graph_rules() {
     assert!(stderr.is_empty());
 }
 
+/// The human report's first-run hint depends on this answer, so the pipeline has to reach the
+/// workspace-owning manifest and distinguish "no `[workspace.dependencies]` table" from "no
+/// readable manifest at all".
+#[test]
+fn a_failing_manifest_rule_records_whether_the_workspace_centralises_versions() {
+    let centralising = |root_manifest: Option<&str>| {
+        let temp = tempdir().expect("temporary pipeline directory should be creatable");
+        let config_path = temp.path().join("depgate.toml");
+        write(&config_path, "schema = 1\n");
+        write_app_manifest(temp.path(), "dep = { version = \"1.0\", optional = true }\n");
+        if let Some(text) = root_manifest {
+            write(&temp.path().join("Cargo.toml"), text);
+        }
+
+        let (result, _) = run_check(&args(temp.path(), Some(config_path)));
+        let outcome = result.expect("manifest entries are returned as an outcome");
+        let report = outcome.manifest.expect("the enabled rule returns its report");
+        assert!(!report.passed(), "the fixture member names a version");
+        report.root_workspace_dependencies
+    };
+
+    assert_eq!(
+        centralising(Some(
+            "[workspace]\nmembers = [\"app\"]\n\n[workspace.dependencies]\ndep = \"1.0\"\n"
+        )),
+        Some(true)
+    );
+    assert_eq!(centralising(Some("[workspace]\nmembers = [\"app\"]\n")), Some(false));
+    assert_eq!(centralising(None), None, "an unreadable root manifest stays unknown");
+}
+
 #[test]
 fn a_missing_member_manifest_aborts_with_exit_3() {
     let temp = tempdir().expect("temporary pipeline directory should be creatable");
@@ -668,4 +699,28 @@ fn explain_warns_that_metadata_json_ignores_config_features() {
         stderr.contains("[graph].features is ignored under --metadata-json"),
         "explain must emit check's feature warning: {stderr:?}"
     );
+}
+
+/// Both argument structs are `#[non_exhaustive]`, so downstream callers reach the pipeline only
+/// through these constructors: `new` has to leave the configuration discovered, and
+/// `with_config_path` has to be the one thing that makes it explicit.
+#[test]
+fn the_argument_constructors_default_to_a_discovered_configuration() {
+    let options = MetadataOptions::default().with_offline(true);
+
+    let discovered = CheckArgs::new(options.clone());
+    assert_eq!(discovered.metadata, options);
+    assert_eq!(discovered.config_path, None);
+
+    let explicit = CheckArgs::new(options.clone()).with_config_path("/ws/depgate.toml");
+    assert_eq!(explicit.config_path, Some(PathBuf::from("/ws/depgate.toml")));
+
+    let explain = ExplainArgs::new(options.clone(), "app", "dep");
+    assert_eq!(explain.metadata, options);
+    assert_eq!(explain.config_path, None);
+    assert_eq!(explain.package, "app");
+    assert_eq!(explain.dependency, "dep");
+
+    let explain = explain.with_config_path(PathBuf::from("/ws/depgate.toml"));
+    assert_eq!(explain.config_path, Some(PathBuf::from("/ws/depgate.toml")));
 }
