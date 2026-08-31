@@ -456,13 +456,40 @@ fn version_uses_the_installed_binary_name() {
     );
 }
 
+/// Cargo passes `depgate` as `argv[1]` when the tool runs as `cargo depgate`, and that token is
+/// stripped before clap parses the rest; a regression there breaks every plugin invocation while
+/// direct runs keep working. Both forms gate the same path-only fixture offline, so what is
+/// compared is the argv handling and nothing else: run against this repository the test would
+/// depend on the network, on a resolvable index and on the state of our own `Cargo.lock`.
 #[test]
 fn direct_and_cargo_plugin_check_invocations_are_identical() {
-    let direct = output(&["check"]);
-    let cargo_plugin = output(&["depgate", "check"]);
+    let fixture = basic_fixture_root();
+    let check = |leading: &[&str]| {
+        depgate()
+            .args(leading)
+            .args(["check", "--manifest-path"])
+            .arg(fixture.join("Cargo.toml"))
+            .arg("--config")
+            .arg(fixture.join("depgate.toml"))
+            .arg("--offline")
+            .output()
+            .expect("cargo-depgate should execute the basic workspace check")
+    };
 
-    assert_eq!(direct.status.code(), Some(2));
-    assert_eq!(cargo_plugin.status.code(), Some(2));
+    let direct = check(&[]);
+    let cargo_plugin = check(&["depgate"]);
+
+    assert_eq!(direct.status.code(), Some(0), "direct check failed: {direct:?}");
+    assert_eq!(
+        cargo_plugin.status.code(),
+        direct.status.code(),
+        "plugin form exited differently: {cargo_plugin:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&cargo_plugin.stdout),
+        String::from_utf8_lossy(&direct.stdout),
+        "plugin form reported differently"
+    );
     assert_eq!(
         strip_cargo_status_lines(&direct.stderr),
         strip_cargo_status_lines(&cargo_plugin.stderr)
