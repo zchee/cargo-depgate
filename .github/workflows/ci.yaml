@@ -38,7 +38,7 @@ jobs:
           # charges a 4 KiB block per directory, APFS charges none), and tests/fixtures
           # now spans 155 directories, so the same tree measures ~1.4 MB on macOS and
           # ~2.0 MB on Linux. Bytes are the property this bound is actually about, and
-          # counting only tracked files is what the repository pays for. 767,743 B today.
+          # counting only tracked files is what the repository pays for. 814,773 B today.
           test "$(git ls-files -z tests/fixtures | xargs -0 cat | wc -c | tr -d '[:space:]')" -le 1048576
           git ls-files --error-unmatch \
             tests/fixtures/lemmy-439734d/metadata.json.gz \
@@ -83,7 +83,7 @@ jobs:
           # charges a 4 KiB block per directory, APFS charges none), and tests/fixtures
           # now spans 155 directories, so the same tree measures ~1.4 MB on macOS and
           # ~2.0 MB on Linux. Bytes are the property this bound is actually about, and
-          # counting only tracked files is what the repository pays for. 767,743 B today.
+          # counting only tracked files is what the repository pays for. 814,773 B today.
           test "$(git ls-files -z tests/fixtures | xargs -0 cat | wc -c | tr -d '[:space:]')" -le 1048576
           git ls-files --error-unmatch \
             tests/fixtures/lemmy-439734d/metadata.json.gz \

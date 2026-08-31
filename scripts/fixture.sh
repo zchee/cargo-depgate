@@ -53,10 +53,13 @@ if [[ -z "$example" ]]; then
     exit 2
 fi
 
-# Per-example recipe. `metadata_flags` is the feature selection the upstream CI
-# assertion documents; it is passed to `cargo metadata`, not to the gate, because
-# --metadata-json makes the gate's own feature flags inert (the document was
-# already resolved with its own selection).
+# Per-example recipe. `metadata_flags` is passed to `cargo metadata`, not to the
+# gate: --metadata-json makes the gate's own feature flags inert, because the
+# document was already resolved with its own selection. lemmy and coreutils are
+# resolved with --all-features because their policies carry per-rule `features`
+# keys, and an activation walk narrows soundly only from a document that left no
+# member's features off; each rule then names the selection its own CI line asks
+# about. ckb has no feature rule and takes the default selection.
 #
 # `expected_shape` is (packages, members, nodes, normal_edges, names) and
 # `expected_counters` is the JSON report's counters that must hold at the pinned
@@ -72,9 +75,10 @@ case "$example" in
         commit="439734dd638a2c06a2f907beab7dcf4646e88f86"
         short="439734d"
         toolchain="1.98.0"
-        metadata_sha256="2745e614512a0441c40d6fc090cc0f318c2b3c63484c5f018e925adbc3a4b3b2"
-        expected_shape="707 41 707 2444 603"
-        expected_counters="packages=707 members=41 normal_edges=2444 names=603 rules=1 violations=0"
+        metadata_flags=(--all-features)
+        metadata_sha256="8cd7fc3b8c8e789bcd880c8b15ec229e0611b278b0738ea0c081fc7782a84770"
+        expected_shape="833 41 833 2950 704"
+        expected_counters="packages=833 members=41 normal_edges=2950 names=704 rules=3 violations=0"
         expected_exit=0
         member_manifests=false
         expected_member_count=0
@@ -96,11 +100,11 @@ case "$example" in
         commit="63410845ef59674fcf4c5b1a8d02a7337e133de9"
         short="6341084"
         toolchain="1.98.0"
-        metadata_flags=(--no-default-features --features feat_os_unix)
-        metadata_sha256="3c09ff1826343e241ad98a9eff849bff578438d5d030588f3bad247bb1f8dbc6"
-        expected_shape="498 114 498 1453 468"
-        expected_counters="packages=498 members=114 normal_edges=1453 names=468 rules=1 violations=1"
-        expected_exit=1
+        metadata_flags=(--all-features)
+        metadata_sha256="c9bb40830a2ebcc8f21ff57dc10478e6020c157f6f6e08791a42486aae7326fe"
+        expected_shape="512 114 512 1493 482"
+        expected_counters="packages=512 members=114 normal_edges=1493 names=482 rules=1 violations=0"
+        expected_exit=0
         member_manifests=false
         expected_member_count=0
         ;;

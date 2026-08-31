@@ -30,8 +30,10 @@ use divan::{Bencher, black_box, counter::BytesCount};
 use flate2::read::GzDecoder;
 
 // The real-fixture benchmarks run on lemmy, the largest of the three committed examples
-// (3,526,964 decompressed bytes against ckb's 3,367,042 and coreutils' 2,026,143), so the
+// (4,073,164 decompressed bytes against ckb's 3,367,042 and coreutils' 2,081,351), so the
 // parse-rate and pipeline numbers describe the worst case the gate actually ships with.
+// lemmy and coreutils are resolved with --all-features, which their feature-aware rules
+// require, so both documents are larger than a default resolve of the same commit.
 const REAL_GZIP_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lemmy-439734d/metadata.json.gz");
 const REAL_FIXTURE_ROOT: &str =
@@ -41,16 +43,16 @@ const REAL_CONFIG_PATH: &str =
 
 /// The pinned shape of the lemmy fixture at `439734d`, asserted once so a fixture swap
 /// cannot silently move the real-fixture numbers.
-const REAL_JSON_BYTES: usize = 3_526_964;
-const REAL_PACKAGES: u32 = 707;
+const REAL_JSON_BYTES: usize = 4_073_164;
+const REAL_PACKAGES: u32 = 833;
 const REAL_MEMBERS: usize = 41;
 
 // The SYNTHETIC_* ratios below are deliberately fixed constants of the generator, not a
 // description of any committed fixture. They were calibrated once against a 585-package /
 // 1,586-edge / 529-name real workspace that this repository no longer ships, and they are kept
 // verbatim so the scaling curve -- and the AC-P* bounds derived from it -- stay comparable
-// across a fixture swap. They are not lemmy's statistics: lemmy resolves 707 packages onto 603
-// names, 70 of them at two or more versions. Nothing reads them except the generator; the
+// across a fixture swap. They are not lemmy's statistics: lemmy resolves 833 packages onto 704
+// names, 83 of them at two or more versions. Nothing reads them except the generator; the
 // real-fixture benchmarks above measure the fixture itself.
 const SYNTHETIC_PACKAGE_BYTES: usize = 4_146;
 const SYNTHETIC_NORMAL_EDGES_PER_PACKAGE: usize = 5;

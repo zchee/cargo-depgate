@@ -1169,12 +1169,12 @@ fn lemmy_metadata_check_passes_with_pinned_graph_counters() {
     assert_counters(
         &report,
         &ExpectedCounters {
-            packages: 707,
+            packages: 833,
             members: 41,
-            normal_edges: 2_444,
-            names: 603,
-            superset_extra_edges: 311,
-            rules: 1,
+            normal_edges: 2_950,
+            names: 704,
+            superset_extra_edges: 400,
+            rules: 3,
             violations: 0,
         },
     );
@@ -1252,84 +1252,118 @@ fn ckb_metadata_check_counters_snapshot() {
 }
 
 #[test]
-fn coreutils_metadata_check_reports_the_optional_ariadne_edge() {
+fn coreutils_metadata_check_passes_on_the_feature_selection_its_ci_documents() {
     let (_temp, output) = example_check(&COREUTILS, &["--format", "json", "--offline"]);
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "coreutils metadata check should violate: {output:?}"
-    );
+    assert_eq!(output.status.code(), Some(0), "coreutils metadata check failed: {output:?}");
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("coreutils report should be valid JSON");
     assert_counters(
         &report,
         &ExpectedCounters {
-            packages: 498,
+            packages: 512,
             members: 114,
-            normal_edges: 1_453,
-            names: 468,
-            superset_extra_edges: 329,
+            normal_edges: 1_493,
+            names: 482,
+            superset_extra_edges: 358,
             rules: 1,
-            violations: 1,
+            violations: 0,
         },
     );
+    assert_eq!(
+        report["violations"].as_array().map(Vec::len),
+        Some(0),
+        "`features = [\"feat_os_unix\"]` asks the question CICD.yml asks: {report}"
+    );
+}
+
+#[test]
+fn coreutils_human_report_names_the_closure_that_compiled_ariadne_out() {
+    let (_temp, output) = example_check(&COREUTILS, &["--offline"]);
+
+    assert_eq!(output.status.code(), Some(0), "coreutils human check should pass: {output:?}");
+    // `docs/examples.md` quotes this line verbatim: the pruned count is what distinguishes
+    // "the selection compiled it out" from "the name was never in the graph".
+    assert_eq!(
+        cleaned_stdout(&output),
+        "ok rules.coreutils.deny (features = [\"feat_os_unix\"], 43 pruned)\n\
+         ok: 1 rules, 0 violations\n"
+    );
+}
+
+#[test]
+fn coreutils_without_the_feature_key_still_reports_the_optional_ariadne_edge() {
+    // The other arm of the same fixture, and the reason the key exists: on the unified
+    // closure the edge is there, because `uu_csplit` and `uu_numfmt` request
+    // `uucore/diagnostics` from their dev-dependencies. Dropping one line from the policy
+    // must bring the finding back, witness and optional annotation included.
+    let (_temp, metadata) = example_metadata_json(&COREUTILS);
+    let config_dir = tempfile::tempdir().expect("temporary unified config should be creatable");
+    let config = config_dir.path().join("depgate.toml");
+    fs::write(
+        &config,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.coreutils]\n\
+         deny = [\"ariadne\"]\n",
+    )
+    .expect("unified config should be writable");
+
+    let output =
+        metadata_check(&metadata, &config, Some(&COREUTILS.fixture_root()), &["--format", "json"]);
+
+    assert_eq!(output.status.code(), Some(1), "the unified closure carries it: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("coreutils report should be valid JSON");
     let records = report["violations"].as_array().expect("violations should be an array");
     assert_eq!(records.len(), 1, "coreutils records drifted at 6341084: {report}");
     let ariadne = &records[0];
     assert_eq!(ariadne["rule_id"], "rules.coreutils.deny");
     assert_eq!(ariadne["kind"], "deny");
+    assert!(ariadne.get("features").is_none(), "a unified rule adds no features key");
     let matched = ariadne["matches"].as_array().expect("matches should be an array");
     assert_eq!(matched.len(), 1);
     assert_eq!(matched[0]["name"], "ariadne");
-    // The witness is the whole point of this example: `ariadne` is reached only through
-    // `uucore`, which declares it `optional = true`. The resolve `cargo metadata` emits is
-    // workspace-unified, so an optional edge any member activates survives the
-    // `--no-default-features --features feat_os_unix` this fixture was generated with, and the
-    // superset the gate walks reports it even though coreutils' own `cargo tree` does not.
-    // `superset_extra_edges` above is the counter that measures the same exposure.
     let witness = matched[0]["witness"].as_array().expect("witness should be an array");
     assert_eq!(witness.len(), 2);
     assert_eq!(witness[0]["name"], "uucore");
     assert_eq!(witness[0]["optional"], serde_json::Value::Bool(false));
     assert_eq!(witness[1]["name"], "ariadne");
     assert_eq!(witness[1]["optional"], serde_json::Value::Bool(true));
-}
 
-#[test]
-fn coreutils_human_report_annotates_the_optional_witness_edge() {
-    let (_temp, output) = example_check(&COREUTILS, &["--offline"]);
-
-    assert_eq!(output.status.code(), Some(1), "coreutils human check should violate: {output:?}");
-    let rendered = cleaned_stdout(&output);
-    let witness = "coreutils v0.10.0 \u{2192} uucore v0.10.0 \u{2192} ariadne v0.6.0 \
+    let human =
+        metadata_check(&metadata, &config, Some(&COREUTILS.fixture_root()), &["--format", "human"]);
+    let rendered = cleaned_stdout(&human);
+    let expected = "coreutils v0.10.0 \u{2192} uucore v0.10.0 \u{2192} ariadne v0.6.0 \
          (optional; present via workspace feature unification)";
-    assert!(rendered.contains(witness), "optional witness {witness:?} missing from: {rendered}");
+    assert!(rendered.contains(expected), "optional witness {expected:?} missing from: {rendered}");
 }
 
 #[test]
 fn coreutils_metadata_check_counters_snapshot() {
     let (_temp, output) = example_check(&COREUTILS, &["--format", "json", "--offline"]);
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "coreutils metadata snapshot should violate: {output:?}"
-    );
+    assert_eq!(output.status.code(), Some(0), "coreutils metadata snapshot failed: {output:?}");
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("coreutils report should be valid JSON");
     assert_counters_snapshot("coreutils_metadata_check_counters_snapshot", report);
 }
 
 #[test]
-fn lemmy_human_report_lists_the_rule_that_matched_nothing() {
+fn lemmy_human_report_lists_every_rule_and_the_closure_each_answered_on() {
     let (_temp, output) = example_check(&LEMMY, &["--offline"]);
 
     assert_eq!(output.status.code(), Some(0), "lemmy human check should pass: {output:?}");
-    // `docs/examples.md` quotes both lines verbatim, and the first one is the point of the
-    // example: a rule that found nothing is still listed, because a green gate that quietly
-    // checked nothing is a failure mode rather than a pass.
-    assert_eq!(cleaned_stdout(&output), "ok rules.lemmy_server.deny\nok: 1 rules, 0 violations\n");
+    // `docs/examples.md` quotes these lines verbatim. Two points live in them: a rule that
+    // found nothing is still listed, because a green gate that quietly checked nothing is a
+    // failure mode rather than a pass; and a rule that passed by narrowing says which closure
+    // answered it and how much of the unified one that removed, so the pass cannot be mistaken
+    // for the workspace-wide claim it is not.
+    assert_eq!(
+        cleaned_stdout(&output),
+        "ok rules.lemmy_server.deny (features = \"default\", 115 pruned)\n\
+         ok rules.lemmy_api_common.deny (features = \"none\", 404 pruned)\n\
+         ok rules.lemmy_api_utils.require (features = \"all\", 31 pruned)\n\
+         ok: 3 rules, 0 violations\n"
+    );
 }
 
 #[test]
@@ -1866,29 +1900,30 @@ fn feature_flags_warn_when_metadata_json_makes_them_inert() {
 
 #[test]
 fn a_feature_aware_rule_is_refused_on_a_default_features_document() {
-    // The committed examples were resolved with default features, so every one of them fails
-    // the premise an activation walk needs. Exit 2 names the first member that proves it.
-    let (_temp, metadata) = example_metadata_json(&LEMMY);
+    // ckb has no feature-aware rule, so its document is generated with the default selection
+    // — which is exactly the premise an activation walk may not assume. Adding one to that
+    // document is exit 2 naming the first member that proves it, rather than a narrowed
+    // closure that could pass a `deny` rule for want of an edge that was never resolved.
+    let (_temp, metadata) = example_metadata_json(&CKB);
     let config_dir = tempfile::tempdir().expect("temporary guard config should be creatable");
     let config = config_dir.path().join("depgate.toml");
     fs::write(
         &config,
-        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.lemmy_api_common]\n\
-         features = \"none\"\ndeny = [\"diesel\"]\n",
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.ckb-util]\n\
+         features = \"none\"\ndeny = [\"libc\"]\n",
     )
     .expect("guard config should be writable");
 
-    let output = metadata_check(&metadata, &config, Some(&LEMMY.fixture_root()), &[]);
+    let output = metadata_check(&metadata, &config, Some(&CKB.fixture_root()), &[]);
 
     assert_eq!(output.status.code(), Some(2), "the guard is a configuration error: {output:?}");
     let stderr = cleaned_stderr(&output);
     assert!(
-        stderr.contains("feature-aware rules need a graph resolved with all features; member "),
-        "the guard names the member it rejected on: {stderr}"
-    );
-    assert!(
-        stderr.contains("re-run with --all-features"),
-        "the guard says how to fix it: {stderr}"
+        stderr.contains(
+            "feature-aware rules need a graph resolved with all features; member ckb-util has 1 \
+             unactivated feature(s) — re-run with --all-features"
+        ),
+        "the guard names the member it rejected on and how to fix it: {stderr}"
     );
 }
 

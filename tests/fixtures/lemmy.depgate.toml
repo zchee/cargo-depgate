@@ -1,30 +1,20 @@
 # Migration policy for LemmyNet/lemmy@439734d, distilled from `.woodpecker.yml`
 # L195-205, the `check_disallowed_dependencies` step. That step is four
-# assertions, of which two are expressible in schema 1:
+# assertions, and all four are expressed below:
 #
 #   L201  "! cargo tree -p lemmy_api_common --no-default-features -i diesel"
 #   L202  "! cargo tree -i aws-lc-sys"
 #   L203  "! cargo tree -i extism"
 #   L204  "cargo tree --all-features -i extism"
 #
-# L202 and L203 are the `deny` rule below. `cargo tree -i <name>` with no `-p`
-# asks a workspace-wide reachability question, and `lemmy_server` is the binary
-# that closes over every other member, so rooting the rule there reproduces it.
-# Neither name is in the resolve at this commit, so the rule is reported as a
-# configured rule that matched nothing -- which is exactly what the CI assertion
-# checks.
+# Four `cargo tree` runs become one resolve. The fixture's metadata document is
+# generated with `--all-features` (see scripts/fixture.sh), which is what every
+# rule carrying a `features` key requires: an activation walk is a subset of the
+# document's closure only when the document left no member's features off.
 #
-# L201 is NOT modelled. `diesel` is reachable from `lemmy_api_common` through
-# `lemmy_db_schema`, where it is declared `optional = true`. `cargo metadata`
-# keeps optional dependency edges in `resolve` whatever feature selection it is
-# run with, and the gate walks the workspace-unified superset, so a `deny` rule
-# for it fires with witness `lemmy_api_common -> lemmy_db_schema -> diesel
-# (optional)` no matter how the fixture is generated. The CI assertion is
-# specifically about `--no-default-features` switching that optional edge off,
-# which schema 1 has no way to express.
-#
-# L204 is a positive assertion -- "extism must be reachable under
-# --all-features" -- and schema 1 has no `require` rule kind.
+# Each rule then names the feature selection its own line asks about, and the
+# gate re-runs cargo's feature resolution from that package over this one
+# document rather than resolving again.
 schema = 1
 
 # lemmy does not enforce workspace version inheritance; 54 member dependency
@@ -33,5 +23,34 @@ schema = 1
 [manifest]
 versions-in-root = false
 
+# L202 and L203. `cargo tree -i <name>` with no `-p` and no feature flags asks a
+# workspace-wide reachability question about the *default* build, and
+# `lemmy_server` is the binary that closes over every other member, so rooting
+# the rule there with `features = "default"` reproduces it. The narrowing does
+# not cost that coverage: all 40 other members are still in the closure the
+# default selection activates, checked by requiring each of them by name. On this
+# `--all-features` document the unified closure does contain `extism` -- the
+# same rule without the key fires with witness
+# `lemmy_server -> lemmy_api_utils -> extism (optional; ...)`, which is the
+# widening the key exists to undo, not a finding upstream would recognise.
 [rules.lemmy_server]
+features = "default"
 deny = ["aws-lc-sys", "extism"]
+
+# L201. `diesel` is reachable from `lemmy_api_common` through `lemmy_db_schema`,
+# which declares it `optional = true`; a different member activating
+# `lemmy_db_schema/full` is what puts the edge in the resolve. With no features
+# of its own turned on, `lemmy_api_common` compiles none of that, and the rule
+# passes on exactly the closure the upstream line asks about.
+[rules.lemmy_api_common]
+features = "none"
+deny = ["diesel"]
+
+# L204, the one positive assertion: `extism` must still be *reachable* with
+# features on, so that the ban above cannot be satisfied by deleting the
+# dependency. `lemmy_api_utils` is the member that declares it, and `require`
+# reads the same closure `deny` reads -- here the one `lemmy_api_utils` compiles
+# with all of its features enabled.
+[rules.lemmy_api_utils]
+features = "all"
+require = ["extism"]

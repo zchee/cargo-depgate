@@ -4,13 +4,13 @@ expression: counters
 ---
 {
   "direct_optional_decls": 0,
-  "matches": 1,
+  "matches": 0,
   "members": 114,
-  "names": 468,
-  "normal_edges": 1453,
-  "packages": 498,
+  "names": 482,
+  "normal_edges": 1493,
+  "packages": 512,
   "rules": 1,
-  "superset_extra_edges": 329,
+  "superset_extra_edges": 358,
   "unrebased_path_deps": 0,
-  "violations": 1
+  "violations": 0
 }

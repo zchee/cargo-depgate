@@ -13,7 +13,7 @@ A high-performance dependency policy enforcer and CI gatekeeper for Cargo worksp
 
 Concretely: the gate's own work after `cargo metadata` returns is ~4 ms on a 700-package workspace,
 so its cost is dominated by the single resolve it already needs. Replacing the four `cargo tree`
-invocations of lemmy's dependency-policy step — two of which the gate expresses directly — with one
+invocations of lemmy's dependency-policy step — all four of which the gate expresses — with one
 gate run measures 3.1x end to end (298.7 ms against 931.2 ms on `aarch64-apple-darwin`; the absolute
 numbers move with the host, the ratio holds), and the ceiling scales with how many invocations a
 policy replaces.
@@ -339,13 +339,15 @@ workspace member through a declaration marked `optional = true`.
 
 | example | packages / members | `superset_extra_edges` |
 |---|---:|---:|
-| [LemmyNet/lemmy@439734d](https://github.com/LemmyNet/lemmy/tree/439734d) | 707 / 41 | 311 |
+| [LemmyNet/lemmy@439734d](https://github.com/LemmyNet/lemmy/tree/439734d) | 833 / 41 | 400 |
 | [nervosnetwork/ckb@17d7db5](https://github.com/nervosnetwork/ckb/tree/17d7db5) | 714 / 75 | 0 |
-| [uutils/coreutils@6341084](https://github.com/uutils/coreutils/tree/6341084) | 498 / 114 | 329 |
+| [uutils/coreutils@6341084](https://github.com/uutils/coreutils/tree/6341084) | 512 / 114 | 358 |
 
 Measured on host **`aarch64-apple-darwin`** (rustc 1.98.0, cargo 1.98.0) against the frozen fixtures
-in `tests/fixtures/`. ckb's 0 is a property of its policy rather than of its graph: the counter
-counts edges a run walked, and a manifest-only policy declares no graph rule, so it walks none.
+in `tests/fixtures/`. The lemmy and coreutils documents are resolved with `--all-features`, which
+their feature-aware rules require, so they carry more packages than a default resolve would. ckb's 0
+is a property of its policy rather than of its graph: the counter counts edges a run walked, and a
+manifest-only policy declares no graph rule, so it walks none.
 
 The extras come from two families and no others: platform-conditional edges, such as the
 `windows-sys` and `wasm-bindgen` families, and optional dependencies that a sibling member unified
@@ -353,8 +355,21 @@ on. Both only ever *widen* the closure. Widening is safe for the containment rul
 and `sealed` cannot lose a finding to it — and it is the measured risk for the equality rules
 `internal` and `direct`, which can report an `+extra` name that a host-rooted, package-rooted view
 would not have shown, and for `require`, which a widened closure can satisfy on an edge the build
-never compiles. [`docs/examples.md`](docs/examples.md) works three real policies through end
-to end, including the coreutils case where this widening is the whole story.
+never compiles.
+
+A rule can also decline the widening. `[rules.<package>].features` re-runs Cargo's feature
+resolution from that package over the same document and answers the rule on the edges that
+activation enables, which is how the two upstream lines that ask about a named feature set — lemmy's
+`cargo tree -p lemmy_api_common --no-default-features -i diesel` and coreutils' `--features
+feat_os_unix` step — are expressed at all. Two divergences from `cargo tree` survive it, and they
+are why the result is still a superset: every platform's edges are kept, and the closure is rooted
+at the package rather than at a build, so the root's own dev-dependencies, which a bare
+`cargo tree -p P` includes, stay out. What the narrowing removed is reported per rule rather than
+counted per run — the human report gives the number, the JSON record lists the names as
+`activation_pruned` — so a pass by narrowing never reads as a workspace-wide claim.
+[`docs/examples.md`](docs/examples.md) works three real policies through end to end, including the
+coreutils case where the same rule fires on the unified closure and passes on the package-rooted
+one.
 
 <!-- depgate:exit-codes -->
 
@@ -428,16 +443,16 @@ overflow from the annotation list. The human report printed below the annotation
 truncated: it always carries every violation, so the annotations are a navigation aid and the report
 is the record.
 
-[`docs/examples.md`](docs/examples.md) migrates three real projects' CI policies this way — two of
-lemmy's four `cargo tree` assertions among them — each with the upstream lines it replaces quoted
+[`docs/examples.md`](docs/examples.md) migrates three real projects' CI policies this way — all
+four of lemmy's `cargo tree` assertions among them — each with the upstream lines it replaces quoted
 next to the rule, so a reviewer can tell a deliberate policy change from an accidental one.
 
 <!-- depgate:version-blind -->
 
 ## Version-blind policies
 
-Rules operate on package **names**, not on `(name, version)` pairs. In the lemmy fixture, 707
-resolved packages project onto 603 distinct names, and 70 of those names are resolved at two or more
+Rules operate on package **names**, not on `(name, version)` pairs. In the lemmy fixture, 833
+resolved packages project onto 704 distinct names, and 83 of those names are resolved at two or more
 versions at once. The consequences are worth stating plainly:
 
 * `deny = ["syn"]` denies every resolved version of `syn`.

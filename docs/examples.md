@@ -6,9 +6,12 @@ project's own CI and distilled into a `depgate.toml`. The `cargo metadata` docum
 
 | example | commit | packages / members | `superset_extra_edges` | exit |
 |---|---|---:|---:|---:|
-| lemmy | `439734d` | 707 / 41 | 311 | `0` |
+| lemmy | `439734d` | 833 / 41 | 400 | `0` |
 | ckb | `17d7db5` | 714 / 75 | 0 | `1` |
-| coreutils | `6341084` | 498 / 114 | 329 | `1` |
+| coreutils | `6341084` | 512 / 114 | 358 | `0` |
+
+lemmy's and coreutils' documents are resolved with `--all-features`, which is what their per-rule
+`features` keys require; ckb's takes the default selection because its policy has no such rule.
 
 Each policy runs against its committed fixture with the same two commands, from the repository root:
 
@@ -19,7 +22,7 @@ cargo depgate check --metadata-json "/tmp/$example-metadata.json" \
   --workspace-root "$dir" --config "tests/fixtures/$example.depgate.toml"
 ```
 
-## lemmy — a workspace-wide ban that holds
+## lemmy — four `cargo tree` runs become one resolve
 
 `LemmyNet/lemmy@439734d`, `.woodpecker.yml` L200-204:
 
@@ -31,33 +34,56 @@ cargo depgate check --metadata-json "/tmp/$example-metadata.json" \
       - "cargo tree --all-features -i extism"
 ```
 
-L202 and L203 ask a workspace-wide reachability question, and `lemmy_server` is the binary that
-closes over every other member, so one `deny` rule rooted there reproduces both:
+Four resolves, four verdicts, and three different feature selections between them. The policy is
+three rules over one document:
 
 ```toml
 [rules.lemmy_server]
+features = "default"
 deny = ["aws-lc-sys", "extism"]
+
+[rules.lemmy_api_common]
+features = "none"
+deny = ["diesel"]
+
+[rules.lemmy_api_utils]
+features = "all"
+require = ["extism"]
 ```
 
 ```text
-ok rules.lemmy_server.deny
-ok: 1 rules, 0 violations
+ok rules.lemmy_server.deny (features = "default", 115 pruned)
+ok rules.lemmy_api_common.deny (features = "none", 404 pruned)
+ok rules.lemmy_api_utils.require (features = "all", 31 pruned)
+ok: 3 rules, 0 violations
 ```
 
-Exit 0 — and the rule that matched nothing is still *listed*, because a green gate that quietly
+Exit 0 — and every rule that matched nothing is still *listed*, because a green gate that quietly
 checks nothing is a failure mode rather than a pass.
 
-The other two lines are outside schema 1, and that is the honest limit. L201 asks whether
-`--no-default-features` switches an optional edge off, but the resolve `cargo metadata` emits is
-workspace-unified: an optional edge that any member activates stays in it, so one member's feature
-selection does not remove it. A `deny` rule therefore fires on
-`lemmy_api_common → lemmy_db_schema → diesel (optional)` however the document was generated.
+The first rule is L202 and L203. `cargo tree -i <name>` with no `-p` and no feature flags asks a
+workspace-wide question about the default build, and `lemmy_server` is the binary that closes over
+every other member — all 40 of them are still in the closure the default selection activates — so
+one rule rooted there with `features = "default"` answers both. The key is
+not decoration here: this document is resolved with `--all-features`, so its unified closure *does*
+contain `extism`, and the same rule without the key fires with
+`lemmy_server → lemmy_api_utils → extism v1.20.0 (optional; present via workspace feature
+unification)` — a finding about an edge no default build compiles.
 
-L204 is a *positive* assertion, which `require = ["extism"]` expresses: it reads the same
-workspace-unified closure `deny` reads, which is the question `cargo tree --all-features -i extism`
-asks as well. It is not in this policy yet because nothing activates `extism` at `439734d`, so the
-rule can only go green once the fixture is regenerated with `--all-features`. Both lines are
-`cargo-depgate-xqh`.
+The second rule is L201, the line that had no expression before. `diesel` reaches
+`lemmy_api_common` through `lemmy_db_schema`, which declares it `optional = true`; the edge is in
+the resolve because a *different* member activates `lemmy_db_schema/full`. `features = "none"` is
+`--no-default-features`, and under it `lemmy_api_common` compiles none of that: 404 of the names in
+its unified closure are gone, `diesel` among them.
+
+The third is L204, the one *positive* assertion — `extism` must still be reachable with features
+on, so the ban above cannot be satisfied by deleting the dependency. `require` is the dual of
+`deny` and reads exactly the closure its own `features` key selects; here that is what
+`lemmy_api_utils`, the member that declares `extism`, compiles with all of its features enabled.
+
+Each of the three narrowings is derived from the one document already in memory, not from another
+resolve, and what each removed is reported per rule: the count above, and the names themselves in
+the JSON record's `activation_pruned`.
 
 ## ckb — a check that was switched off
 
@@ -94,7 +120,7 @@ workspace version, while `versions-in-root` asks whether any entry names a versi
 the check is commented out, nothing has been enforced here — the 24 entries are the residue a
 disabled check leaves behind.
 
-## coreutils — where resolve-level checking ends
+## coreutils — the same rule, two closures
 
 `uutils/coreutils@6341084`, `.github/workflows/CICD.yml` L987-994, two lines elided:
 
@@ -107,21 +133,38 @@ disabled check leaves behind.
         fi
 ```
 
-`deny = ["ariadne"]` on `rules.coreutils` exits 1:
+The flag pair is the whole assertion, and a list-valued `features` key is resolved the same way —
+`--no-default-features --features …`:
+
+```toml
+[rules.coreutils]
+features = ["feat_os_unix"]
+deny = ["ariadne"]
+```
 
 ```text
-30 | deny = ["ariadne"]
-   |        ^^^^^^^^^^^ 1 match(es)
+ok rules.coreutils.deny (features = ["feat_os_unix"], 43 pruned)
+ok: 1 rules, 0 violations
+```
+
+Drop the one `features` line and the same rule exits 1, on the same document, with the witness the
+gate has always reported for it:
+
+```text
   coreutils v0.10.0 → uucore v0.10.0 → ariadne v0.6.0 (optional; present via workspace feature unification)
 ```
 
-coreutils' own CI is green here, and neither result is wrong. `uucore` declares `ariadne` with
-`optional = true`, and the resolve `cargo metadata` emits is workspace-unified: an optional edge
-that any member activates survives another member's `--no-default-features`. This fixture is
-generated with exactly `--no-default-features --features feat_os_unix`, and the edge is there
-anyway. The gate walks that workspace-unified superset by design, which makes a
-build-level "compiled out" claim the documented boundary of resolve-level checking
-(`cargo-depgate-xqh`) — and `superset_extra_edges = 329` measures exactly how far it widens.
+Neither result is wrong; they answer different questions. `uucore` declares `ariadne` optional
+behind its `diagnostics` feature, and the resolve `cargo metadata` emits is unified over every
+member, every dependency kind and every platform, so the edge is in it twice over: this document
+was generated with `--all-features`, and even the flag pair upstream documents would leave it
+there, because `uu_csplit` and `uu_numfmt` request `uucore/diagnostics` from their
+`[dev-dependencies]` while the upstream command carries `-e normal`. The unified rule reports that
+edge, correctly. The feature-aware rule starts from `coreutils`, follows normal edges only, and
+never reaches it — which is the build-level claim the CI step is making.
+
+`superset_extra_edges = 358` measures the widening that is still there for every rule that does not
+narrow, and the 43 names this rule pruned measure what narrowing removed for the one that does.
 
 ## Why the shell form is fragile
 

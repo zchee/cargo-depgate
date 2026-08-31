@@ -737,8 +737,9 @@ fn the_guard_names_the_first_member_the_resolve_left_features_off() {
 struct Fixture {
     name: &'static str,
     directory: &'static str,
-    /// The first member whose features the resolve left off, and how many it left off.
-    offender: (&'static str, u32),
+    /// The first member whose features the resolve left off, and how many it left off;
+    /// `None` for a document generated with `--all-features`, which the guard must accept.
+    offender: Option<(&'static str, u32)>,
     /// Names guppy reaches on the host that the walk does not, over all members.
     guppy_only: &'static [&'static str],
     /// Names the walk reaches that guppy does not reach on any platform, over all members.
@@ -777,21 +778,21 @@ const FIXTURES: &[Fixture] = &[
     Fixture {
         name: "lemmy",
         directory: "tests/fixtures/lemmy-439734d",
-        offender: ("lemmy_utils", 1),
+        offender: None,
         guppy_only: &[],
         ours_only: &[],
     },
     Fixture {
         name: "ckb",
         directory: "tests/fixtures/ckb-17d7db5",
-        offender: ("ckb-util", 1),
+        offender: Some(("ckb-util", 1)),
         guppy_only: &[],
         ours_only: &[],
     },
     Fixture {
         name: "coreutils",
         directory: "tests/fixtures/coreutils-6341084",
-        offender: ("coreutils", 24),
+        offender: None,
         guppy_only: UUCORE_TIME_COLLISION_GUPPY_ONLY,
         ours_only: UUCORE_TIME_COLLISION_OURS_ONLY,
     },
@@ -807,25 +808,21 @@ fn fixture_json(fixture: &Fixture) -> String {
 }
 
 #[test]
-fn the_guard_rejects_every_committed_example_document() {
-    // All three were generated with default features, which is exactly the situation the
-    // guard exists to catch: a narrowed closure over such a document could pass a `deny`
-    // rule because the edge it would have matched was never resolved into the graph.
+fn the_guard_reads_each_committed_document_the_way_it_was_generated() {
+    // lemmy and coreutils are generated with `--all-features` because their policies carry
+    // feature-aware rules, so the guard must accept them; ckb has no such rule and takes the
+    // default selection, which is exactly the situation the guard exists to catch — a narrowed
+    // closure over such a document could pass a `deny` rule because the edge it would have
+    // matched was never resolved into the graph.
     for fixture in FIXTURES {
         let json = fixture_json(fixture);
         let buffer = MetadataBuffer::from_bytes(json.into_bytes());
         let meta = parse(&buffer).expect("the example document parses");
         let graph = Graph::build(&meta).expect("the example graph builds");
 
-        let offender = first_unactivated_member(&graph)
-            .expect("the guard runs")
-            .unwrap_or_else(|| panic!("{} must be rejected by the guard", fixture.name));
-        assert_eq!(
-            (offender.package.as_str(), offender.unactivated),
-            fixture.offender,
-            "{} named the wrong first offender",
-            fixture.name
-        );
+        let offender = first_unactivated_member(&graph).expect("the guard runs");
+        let named = offender.as_ref().map(|member| (member.package.as_str(), member.unactivated));
+        assert_eq!(named, fixture.offender, "{} got the wrong guard verdict", fixture.name);
     }
 }
 
