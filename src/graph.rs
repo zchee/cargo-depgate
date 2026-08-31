@@ -53,7 +53,7 @@ use serde_json::value::RawValue;
 
 use crate::{
     error::Error,
-    metadata::{Dep, Meta, Pkg, Resolve, resolve_of},
+    metadata::{Dep, Meta, Node, Pkg, Resolve, resolve_of},
     timings::Counters,
 };
 
@@ -92,6 +92,10 @@ pub struct Graph<'m> {
     forward: Csr,
     /// CSR edge → its still-borrowed `dep_kinds` slice (non-empty by construction).
     edge_kinds: Box<[&'m RawValue]>,
+    /// CSR edge → the `deps[].name` cargo recorded for it: the dependency's library
+    /// target name, renamed if the declaration renamed it. `None` when the document
+    /// predates the field.
+    edge_extern: Box<[Option<&'m str>]>,
     /// Edges whose every normal `dep_kinds` entry carries a `target`.
     edge_cfg_only: FixedBitSet,
     /// Edges out of a member whose every normal declaration of the target's name is
@@ -105,6 +109,9 @@ pub struct Graph<'m> {
     nodes_by_name: Box<[u32]>,
     members: Box<[u32]>,
     is_member: FixedBitSet,
+    /// The `resolve.nodes[]` entry of every package, indexed by node id: `resolve.nodes`
+    /// is not in `packages[]` order, and the feature walk needs the two joined.
+    resolve_nodes: Box<[&'m Node<'m>]>,
     transposed: OnceLock<Transposed>,
 }
 
@@ -158,16 +165,22 @@ impl<'m> Graph<'m> {
         let node_of_pkg = map_nodes(resolve, &id_to_pkg, package_count)?;
         let NameTables { names, name_ids, node_to_name } = intern_names(packages);
         let (members, is_member) = collect_members(meta, &id_to_pkg)?;
-        let (forward, edge_kinds, edge_cfg_only) =
+        let Csrs { forward, edge_kinds, edge_extern, edge_cfg_only } =
             build_csr(resolve, &node_of_pkg, &id_to_pkg, total_deps)?;
         let edge_member_optional =
             mark_member_optional(packages, &members, &forward, &names, &node_to_name)?;
         let (name_offsets, nodes_by_name) = group_by_name(&node_to_name, names.len());
+        let resolve_nodes = node_of_pkg
+            .iter()
+            .map(|&node_index| &resolve.nodes[node_index as usize])
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
         Ok(Self {
             meta,
             forward,
             edge_kinds,
+            edge_extern,
             edge_cfg_only,
             edge_member_optional,
             node_to_name,
@@ -177,6 +190,7 @@ impl<'m> Graph<'m> {
             nodes_by_name,
             members,
             is_member,
+            resolve_nodes,
             transposed: OnceLock::new(),
         })
     }
@@ -226,6 +240,12 @@ impl<'m> Graph<'m> {
     #[must_use]
     pub fn package(&self, node: u32) -> &'m Pkg<'m> {
         &self.meta.packages[node as usize]
+    }
+
+    /// The `resolve.nodes[]` entry of `node`.
+    #[must_use]
+    pub fn resolve_node(&self, node: u32) -> &'m Node<'m> {
+        self.resolve_nodes[node as usize]
     }
 
     /// The package name of `node`.
@@ -375,6 +395,16 @@ impl<'m> Graph<'m> {
     #[must_use]
     pub fn edge_dep_kinds(&self, edge: u32) -> &'m RawValue {
         self.edge_kinds[edge as usize]
+    }
+
+    /// The `deps[].name` of `edge`: the dependency's **library target** name, renamed if
+    /// the declaration renamed it, or `None` on a document that predates the field.
+    ///
+    /// It is not the package name — `md-5` is reported as `md5` — so this only ever
+    /// distinguishes two edges of one source, never identifies a package.
+    #[must_use]
+    pub fn edge_extern_name(&self, edge: u32) -> Option<&'m str> {
+        self.edge_extern[edge as usize]
     }
 
     /// Decodes the `dep_kinds` entries of `edge` — the lazy path used only when a
@@ -588,18 +618,25 @@ fn collect_members(
     Ok((members.into_boxed_slice(), is_member))
 }
 
+/// The per-edge tables [`build_csr`] produces alongside the adjacency itself.
+struct Csrs<'m> {
+    forward: Csr,
+    edge_kinds: Box<[&'m RawValue]>,
+    edge_extern: Box<[Option<&'m str>]>,
+    edge_cfg_only: FixedBitSet,
+}
+
 /// Folds every edge's `dep_kinds` and lays the normal edges out as a CSR (§3.2 steps 5–6).
-///
-/// Returns the CSR, the raw `dep_kinds` slice of every CSR edge, and the cfg-only bitset.
 fn build_csr<'m>(
     resolve: &'m Resolve<'m>,
     node_of_pkg: &[u32],
     id_to_pkg: &FxHashMap<&str, u32>,
     total_deps: usize,
-) -> Result<(Csr, Box<[&'m RawValue]>, FixedBitSet), Error> {
+) -> Result<Csrs<'m>, Error> {
     let mut offsets = Vec::with_capacity(node_of_pkg.len() + 1);
     let mut adj: Vec<u32> = Vec::with_capacity(total_deps);
     let mut edge_kinds: Vec<&'m RawValue> = Vec::with_capacity(total_deps);
+    let mut edge_extern: Vec<Option<&'m str>> = Vec::with_capacity(total_deps);
     let mut cfg_only_edges: Vec<u32> = Vec::new();
     for &node_index in node_of_pkg {
         offsets.push(narrow(adj.len()));
@@ -633,6 +670,7 @@ fn build_csr<'m>(
             }
             adj.push(to);
             edge_kinds.push(raw);
+            edge_extern.push(dep.name.as_deref());
         }
     }
     offsets.push(narrow(adj.len()));
@@ -640,8 +678,12 @@ fn build_csr<'m>(
     for edge in cfg_only_edges {
         edge_cfg_only.insert(edge as usize);
     }
-    let forward = Csr { offsets: offsets.into_boxed_slice(), adj: adj.into_boxed_slice() };
-    Ok((forward, edge_kinds.into_boxed_slice(), edge_cfg_only))
+    Ok(Csrs {
+        forward: Csr { offsets: offsets.into_boxed_slice(), adj: adj.into_boxed_slice() },
+        edge_kinds: edge_kinds.into_boxed_slice(),
+        edge_extern: edge_extern.into_boxed_slice(),
+        edge_cfg_only,
+    })
 }
 
 /// One package's normal declarations folded by name (§1.5).
@@ -1122,7 +1164,12 @@ impl KindEntry {
 }
 
 /// One declared `packages[].dependencies[]` entry, borrowed from the JSON.
+///
+/// `#[non_exhaustive]` because the feature walk keeps pulling more of the declaration in
+/// and a downstream struct literal would break on each addition; the crate's own
+/// construction path is deserialization.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct DeclaredDep<'a> {
     /// The dependency's package name (never the rename).
     #[serde(borrow)]
@@ -1139,6 +1186,18 @@ pub struct DeclaredDep<'a> {
     /// The `cfg(...)` or target triple the declaration is conditional on.
     #[serde(borrow, default)]
     pub target: Option<Cow<'a, str>>,
+    /// The features this declaration requests on the dependency.
+    #[serde(borrow, default)]
+    pub features: Vec<Cow<'a, str>>,
+    /// Whether the dependency's `default` feature is requested.
+    ///
+    /// Cargo's default is `true`, so an absent key means `true` here as well.
+    #[serde(default = "uses_default_features_default")]
+    pub uses_default_features: bool,
+}
+
+fn uses_default_features_default() -> bool {
+    true
 }
 
 impl DeclaredDep<'_> {
@@ -1146,6 +1205,17 @@ impl DeclaredDep<'_> {
     #[must_use]
     pub fn is_normal(&self) -> bool {
         self.kind.is_none()
+    }
+
+    /// The name the dependency is used under: the rename when it has one, else the
+    /// package name.
+    ///
+    /// Feature syntax addresses a dependency by this name (`serde1/derive` refers to the
+    /// rename). The resolve edge is found by [`DeclaredDep::name`] and told apart from the
+    /// other edges of that package by [`Graph::edge_extern_name`].
+    #[must_use]
+    pub fn extern_name(&self) -> &str {
+        self.rename.as_deref().unwrap_or(&self.name)
     }
 }
 

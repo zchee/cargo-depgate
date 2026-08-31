@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod features;
 pub mod graph;
 pub mod manifest;
 pub mod metadata;

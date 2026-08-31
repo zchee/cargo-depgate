@@ -310,7 +310,11 @@ pub struct Meta<'a> {
 }
 
 /// One `packages[]` entry.
+///
+/// `#[non_exhaustive]` because 0.2 keeps growing this struct as more of the document is
+/// consumed, and a downstream struct literal would break on every one of those additions.
 #[derive(Debug, Deserialize)]
+#[non_exhaustive]
 pub struct Pkg<'a> {
     /// The package id (`path+file:///…#name@version` or `registry+…#name@version`).
     #[serde(borrow)]
@@ -330,6 +334,12 @@ pub struct Pkg<'a> {
     /// The declared `dependencies` array, undecoded.
     #[serde(borrow)]
     pub dependencies: &'a RawValue,
+    /// The declared `[features]` table, undecoded; `None` when the document omits it.
+    ///
+    /// Only the *declared* table: cargo does not materialise the implicit feature an
+    /// optional dependency carries, so a walk over this table has to add those itself.
+    #[serde(borrow, default)]
+    pub features: Option<&'a RawValue>,
 }
 
 impl Pkg<'_> {
@@ -352,7 +362,10 @@ pub struct Resolve<'a> {
 }
 
 /// One `resolve.nodes[]` entry.
+///
+/// `#[non_exhaustive]` for the same reason as [`Pkg`].
 #[derive(Debug, Deserialize)]
+#[non_exhaustive]
 pub struct Node<'a> {
     /// The package id this node describes.
     #[serde(borrow)]
@@ -360,17 +373,29 @@ pub struct Node<'a> {
     /// The resolved edges.
     #[serde(borrow)]
     pub deps: Vec<Dep<'a>>,
+    /// The features cargo activated on this node, undecoded; `None` when the document
+    /// omits it. This is the workspace-unified activation, not a package-rooted one.
+    #[serde(borrow, default)]
+    pub features: Option<&'a RawValue>,
 }
 
 /// One `resolve.nodes[].deps[]` entry.
 ///
-/// `deps[].name` (the possibly renamed crate name) is deliberately not captured:
-/// names are always taken from the package `pkg` resolves to (§4.3).
+/// A node's *package* name is still always taken from the package `pkg` resolves to
+/// (§4.3); `name` is captured only to tell two edges to the same package name apart.
 #[derive(Debug, Deserialize)]
+#[non_exhaustive]
 pub struct Dep<'a> {
     /// The id of the package this edge points to.
     #[serde(borrow)]
     pub pkg: Cow<'a, str>,
+    /// The dependency's **library target** name, renamed if the declaration renamed it.
+    ///
+    /// This is not the package name: cargo reports the lib target, so `md-5` appears as
+    /// `md5`, `async-trait` as `async_trait`, and `redox_syscall` as `syscall`. `None` on
+    /// a document old enough not to carry the field.
+    #[serde(borrow, default)]
+    pub name: Option<Cow<'a, str>>,
     /// The `dep_kinds` array, undecoded; `None` when absent (pre-1.41 cargo).
     #[serde(borrow, default)]
     pub dep_kinds: Option<&'a RawValue>,
