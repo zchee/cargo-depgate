@@ -88,7 +88,7 @@ fn every_line_splits_into_exactly_two_fields_on_the_tab() {
 
     let text = String::from_utf8(out).expect("ASCII output");
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), Phase::ALL.len() + Counters::default().entries().len());
+    assert_eq!(lines.len(), Phase::ALL.len() + Counters::default().entries().count());
     for line in lines {
         let fields: Vec<&str> = line.split('\t').collect();
         assert_eq!(fields.len(), 2, "malformed line {line:?}");
@@ -127,7 +127,7 @@ fn finish_is_idempotent_and_refreshes_total_from_wall_time() {
 
 #[test]
 fn counter_entries_follow_the_json_counters_order() {
-    let labels: Vec<&str> = Counters::default().entries().iter().map(|(label, _)| *label).collect();
+    let labels: Vec<&str> = Counters::default().entries().map(|(label, _)| label).collect();
 
     assert_eq!(
         labels,

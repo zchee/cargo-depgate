@@ -602,3 +602,37 @@ fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     path
 }
+
+/// The builder is the only way to construct [`MetadataOptions`] outside this crate, so it has
+/// to reach every field: a setter that silently dropped its argument would leave downstream
+/// callers spawning cargo with different flags than they asked for.
+#[test]
+fn the_options_builder_reaches_every_field() {
+    let built = MetadataOptions::default()
+        .with_cargo("/opt/cargo")
+        .with_manifest_path("/ws/Cargo.toml")
+        .with_features(["app/other"])
+        .with_all_features(true)
+        .with_no_default_features(true)
+        .with_offline(true)
+        .with_locked(false)
+        .with_timeout(Duration::from_secs(7))
+        .with_source(MetadataSource::Stdin)
+        .with_workspace_root("/ws");
+
+    assert_eq!(
+        built,
+        MetadataOptions {
+            cargo: Some(PathBuf::from("/opt/cargo")),
+            manifest_path: Some(PathBuf::from("/ws/Cargo.toml")),
+            features: vec!["app/other".to_owned()],
+            all_features: true,
+            no_default_features: true,
+            offline: true,
+            locked: false,
+            timeout: Duration::from_secs(7),
+            source: Some(MetadataSource::Stdin),
+            workspace_root: Some(PathBuf::from("/ws")),
+        }
+    );
+}

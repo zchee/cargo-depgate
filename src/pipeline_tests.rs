@@ -568,3 +568,27 @@ fn explain_warns_that_metadata_json_ignores_config_features() {
         "explain must emit check's feature warning: {stderr:?}"
     );
 }
+
+/// Both argument structs are `#[non_exhaustive]`, so downstream callers reach the pipeline only
+/// through these constructors: `new` has to leave the configuration discovered, and
+/// `with_config_path` has to be the one thing that makes it explicit.
+#[test]
+fn the_argument_constructors_default_to_a_discovered_configuration() {
+    let options = MetadataOptions::default().with_offline(true);
+
+    let discovered = CheckArgs::new(options.clone());
+    assert_eq!(discovered.metadata, options);
+    assert_eq!(discovered.config_path, None);
+
+    let explicit = CheckArgs::new(options.clone()).with_config_path("/ws/depgate.toml");
+    assert_eq!(explicit.config_path, Some(PathBuf::from("/ws/depgate.toml")));
+
+    let explain = ExplainArgs::new(options.clone(), "app", "dep");
+    assert_eq!(explain.metadata, options);
+    assert_eq!(explain.config_path, None);
+    assert_eq!(explain.package, "app");
+    assert_eq!(explain.dependency, "dep");
+
+    let explain = explain.with_config_path(PathBuf::from("/ws/depgate.toml"));
+    assert_eq!(explain.config_path, Some(PathBuf::from("/ws/depgate.toml")));
+}

@@ -43,6 +43,7 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 /// How metadata is obtained and, once obtained, rebased.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 #[expect(clippy::struct_excessive_bools, reason = "mirrors cargo's independent boolean flags")]
 pub struct MetadataOptions {
     /// The `cargo` executable to spawn. `None` honours `$CARGO` and falls back to `cargo`.
@@ -81,6 +82,78 @@ impl Default for MetadataOptions {
             source: None,
             workspace_root: None,
         }
+    }
+}
+
+impl MetadataOptions {
+    /// Overrides the `cargo` executable to spawn.
+    #[must_use]
+    pub fn with_cargo(mut self, cargo: impl Into<PathBuf>) -> Self {
+        self.cargo = Some(cargo.into());
+        self
+    }
+
+    /// Sets the `--manifest-path` cargo searches from.
+    #[must_use]
+    pub fn with_manifest_path(mut self, manifest_path: impl Into<PathBuf>) -> Self {
+        self.manifest_path = Some(manifest_path.into());
+        self
+    }
+
+    /// Replaces the `--features` entries, forwarded verbatim.
+    #[must_use]
+    pub fn with_features(mut self, features: impl IntoIterator<Item: Into<String>>) -> Self {
+        self.features = features.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets `--all-features`.
+    #[must_use]
+    pub const fn with_all_features(mut self, all_features: bool) -> Self {
+        self.all_features = all_features;
+        self
+    }
+
+    /// Sets `--no-default-features`.
+    #[must_use]
+    pub const fn with_no_default_features(mut self, no_default_features: bool) -> Self {
+        self.no_default_features = no_default_features;
+        self
+    }
+
+    /// Sets `--offline`.
+    #[must_use]
+    pub const fn with_offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
+        self
+    }
+
+    /// Sets `--locked`, which defaults to `true` because a gate must never rewrite `Cargo.lock`.
+    #[must_use]
+    pub const fn with_locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
+    }
+
+    /// Sets the maximum runtime of the `cargo metadata` child process.
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Reads precomputed metadata from `source` instead of spawning cargo.
+    #[must_use]
+    pub fn with_source(mut self, source: MetadataSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// Rebases the document's `workspace_root` and member manifests onto `workspace_root`.
+    #[must_use]
+    pub fn with_workspace_root(mut self, workspace_root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(workspace_root.into());
+        self
     }
 }
 

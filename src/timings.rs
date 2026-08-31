@@ -126,7 +126,16 @@ impl Timings {
 }
 
 /// The run counters of §1.5, in report order.
+///
+/// This is an output of the pipeline, not an input to it: a caller reads one off
+/// [`crate::pipeline::Outcome`]. Adding a counter is not a breaking change: `#[non_exhaustive]`
+/// closes the struct-literal form downstream, and [`Counters::entries`] yields an iterator
+/// rather than a fixed-length array, so the counter count is not pinned in a public
+/// signature either. Every field stays public, so a caller that needs to build one anyway
+/// (a test asserting an expected count) starts from [`Counters::default`] and assigns the
+/// fields it cares about.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Counters {
     /// Nodes in the graph (= `packages[]` entries).
     pub packages: u32,
@@ -152,8 +161,11 @@ pub struct Counters {
 
 impl Counters {
     /// `(label, value)` pairs in report order.
-    #[must_use]
-    pub fn entries(&self) -> [(&'static str, u32); 10] {
+    ///
+    /// The count is deliberately absent from this signature: an array return type would
+    /// make adding a counter a breaking change, which is exactly what `#[non_exhaustive]`
+    /// on [`Counters`] is spent to avoid.
+    pub fn entries(&self) -> impl Iterator<Item = (&'static str, u32)> + '_ {
         [
             ("packages", self.packages),
             ("members", self.members),
@@ -166,6 +178,7 @@ impl Counters {
             ("violations", self.violations),
             ("matches", self.matches),
         ]
+        .into_iter()
     }
 
     /// Writes one `<counter>\t<n>` line per field.
