@@ -19,7 +19,14 @@ use crate::{
 
 use super::RenderContext;
 
+/// The one-line first-run hint appended to a failing manifest report.
+const MANIFEST_HINT: &str = "hint: set [manifest] versions-in-root = false in depgate.toml \
+                             if this workspace does not centralise versions";
+
 /// Renders the complete human-readable policy report.
+///
+/// A failing `manifest.versions-in-root` over a workspace with no `[workspace.dependencies]`
+/// table adds one closing hint line saying the rule can be turned off.
 ///
 /// # Errors
 ///
@@ -53,7 +60,26 @@ pub fn render(
         out,
         "{verdict}: {} rules, {} violations",
         outcome.counters.rules, outcome.counters.violations
-    )
+    )?;
+    render_manifest_hint(outcome, out)
+}
+
+/// The first-run hint for `manifest.versions-in-root`.
+///
+/// The rule defaults to on, so a workspace that keeps its versions in the members —
+/// `tempfile = "3"` in a `[dev-dependencies]` table is enough — fails on its very first run
+/// against a minimal `depgate.toml`, and nothing in the report says the rule is optional.
+/// The hint is printed once per run, after the verdict, and only when the workspace has no
+/// `[workspace.dependencies]` table for the rule to protect; a workspace that does
+/// centralise its versions is being told exactly what it asked to be told.
+fn render_manifest_hint(outcome: &crate::pipeline::Outcome, out: &mut dyn Write) -> io::Result<()> {
+    let Some(report) = &outcome.manifest else {
+        return Ok(());
+    };
+    if report.passed() || report.root_workspace_dependencies != Some(false) {
+        return Ok(());
+    }
+    writeln!(out, "{MANIFEST_HINT}")
 }
 
 fn render_pass(status: &RuleStatus, color: bool, out: &mut dyn Write) -> io::Result<()> {
@@ -76,7 +102,7 @@ fn render_manifest_failure(
     let display_file = display_path(&entry.span.file, &outcome.workspace_root).to_string();
     let rendered = fs::read_to_string(&entry.span.file).ok().and_then(|source| {
         let start = line_col_to_offset(&source, entry.span.line, entry.span.col)?;
-        let end = start.checked_add(entry.version.len().checked_add(2)?)?;
+        let end = start.checked_add(entry.span_bytes)?;
         render_snippet(&source, &display_file, status, &label, start..end, ctx.color)
     });
 

@@ -31,6 +31,11 @@ pub struct RenderContext {
     pub version: &'static str,
     /// Whether ANSI styling should be emitted by the human reporter.
     pub color: bool,
+    /// The `$GITHUB_WORKSPACE` directory when the process runs under GitHub Actions.
+    ///
+    /// Only the GitHub reporter reads it, to anchor annotation paths where Actions
+    /// resolves them; [`RenderContext::new`] leaves it unset.
+    pub github_workspace: Option<PathBuf>,
 }
 
 impl RenderContext {
@@ -43,7 +48,18 @@ impl RenderContext {
         version: &'static str,
         color: bool,
     ) -> Self {
-        Self { workspace_root, tool, version, color }
+        Self { workspace_root, tool, version, color, github_workspace: None }
+    }
+
+    /// Records the GitHub Actions checkout directory (`$GITHUB_WORKSPACE`) the GitHub
+    /// reporter anchors annotation paths to.
+    ///
+    /// An empty value is treated as unset, because an empty prefix would strip nothing
+    /// and leave an absolute path in the annotation.
+    #[must_use]
+    pub fn with_github_workspace(mut self, github_workspace: Option<PathBuf>) -> Self {
+        self.github_workspace = github_workspace.filter(|path| !path.as_os_str().is_empty());
+        self
     }
 }
 

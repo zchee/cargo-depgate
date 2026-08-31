@@ -19,6 +19,7 @@ const CURRENT_SCHEMA: u32 = 1;
 
 /// A source location in a configuration file.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub struct Span {
     /// The path of the configuration file.
     pub file: PathBuf,
@@ -26,6 +27,14 @@ pub struct Span {
     pub line: u32,
     /// The one-based source column.
     pub col: u32,
+}
+
+impl Span {
+    /// A source location at the one-based `line` and `col` of `file`.
+    #[must_use]
+    pub fn new(file: impl Into<PathBuf>, line: u32, col: u32) -> Self {
+        Self { file: file.into(), line, col }
+    }
 }
 
 /// The graph feature selection requested by a configuration.
@@ -889,11 +898,11 @@ fn config_error_span(cfg: &RawConfig, offset: usize) -> Option<Span> {
 fn config_span(cfg: &RawConfig, offset: usize) -> Span {
     match &cfg.source {
         Some(source) => source_span(&source.path, &source.text, offset),
-        None => Span {
-            file: PathBuf::new(),
-            line: 1,
-            col: u32::try_from(offset.saturating_add(1)).unwrap_or(u32::MAX),
-        },
+        None => Span::new(
+            PathBuf::new(),
+            1,
+            u32::try_from(offset.saturating_add(1)).unwrap_or(u32::MAX),
+        ),
     }
 }
 
@@ -906,11 +915,7 @@ pub(crate) fn source_span(path: &Path, text: &str, offset: usize) -> Span {
     let line = text[..offset].bytes().filter(|&byte| byte == b'\n').count() + 1;
     let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
     let col = text[line_start..offset].chars().count() + 1;
-    Span {
-        file: path.to_path_buf(),
-        line: u32::try_from(line).unwrap_or(u32::MAX),
-        col: u32::try_from(col).unwrap_or(u32::MAX),
-    }
+    Span::new(path, u32::try_from(line).unwrap_or(u32::MAX), u32::try_from(col).unwrap_or(u32::MAX))
 }
 
 fn array_entry_range(cfg: &RawConfig, span: Range<usize>, index: usize) -> Range<usize> {

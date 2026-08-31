@@ -16,10 +16,10 @@ use std::{
     fs::File,
     io::{self, ErrorKind, Read},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cargo_metadata::{CargoOpt, MetadataCommand};
@@ -41,8 +41,25 @@ const SPAWN_INITIAL_CAPACITY: usize = 4 * 1024 * 1024;
 /// The default `--cargo-timeout`, in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
+/// The smallest budget granted to the post-EOF reap of `cargo metadata`.
+///
+/// EOF on the pipe means every writer closed it, so cargo has exited or is about to; the
+/// remaining share of `--cargo-timeout` is the natural budget, but a run that spent its whole
+/// timeout streaming output would otherwise be left with none and a healthy exit would be
+/// reported as a timeout. Two seconds is long enough for a process that has already closed
+/// its standard output to be reaped on a loaded machine, and short enough that a cargo which
+/// closes stdout and then blocks (a stuck credential helper) cannot hang the gate.
+const REAP_FLOOR: Duration = Duration::from_secs(2);
+
+/// The longest gap between `try_wait` polls while reaping after EOF.
+///
+/// The first polls are far shorter, so the common case — a child that is already gone —
+/// costs one `waitpid` and no sleep at all.
+const REAP_POLL_MAX: Duration = Duration::from_millis(5);
+
 /// How metadata is obtained and, once obtained, rebased.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 #[expect(clippy::struct_excessive_bools, reason = "mirrors cargo's independent boolean flags")]
 pub struct MetadataOptions {
     /// The `cargo` executable to spawn. `None` honours `$CARGO` and falls back to `cargo`.
@@ -81,6 +98,78 @@ impl Default for MetadataOptions {
             source: None,
             workspace_root: None,
         }
+    }
+}
+
+impl MetadataOptions {
+    /// Overrides the `cargo` executable to spawn.
+    #[must_use]
+    pub fn with_cargo(mut self, cargo: impl Into<PathBuf>) -> Self {
+        self.cargo = Some(cargo.into());
+        self
+    }
+
+    /// Sets the `--manifest-path` cargo searches from.
+    #[must_use]
+    pub fn with_manifest_path(mut self, manifest_path: impl Into<PathBuf>) -> Self {
+        self.manifest_path = Some(manifest_path.into());
+        self
+    }
+
+    /// Replaces the `--features` entries, forwarded verbatim.
+    #[must_use]
+    pub fn with_features(mut self, features: impl IntoIterator<Item: Into<String>>) -> Self {
+        self.features = features.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets `--all-features`.
+    #[must_use]
+    pub const fn with_all_features(mut self, all_features: bool) -> Self {
+        self.all_features = all_features;
+        self
+    }
+
+    /// Sets `--no-default-features`.
+    #[must_use]
+    pub const fn with_no_default_features(mut self, no_default_features: bool) -> Self {
+        self.no_default_features = no_default_features;
+        self
+    }
+
+    /// Sets `--offline`.
+    #[must_use]
+    pub const fn with_offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
+        self
+    }
+
+    /// Sets `--locked`, which defaults to `true` because a gate must never rewrite `Cargo.lock`.
+    #[must_use]
+    pub const fn with_locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
+    }
+
+    /// Sets the maximum runtime of the `cargo metadata` child process.
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Reads precomputed metadata from `source` instead of spawning cargo.
+    #[must_use]
+    pub fn with_source(mut self, source: MetadataSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// Rebases the document's `workspace_root` and member manifests onto `workspace_root`.
+    #[must_use]
+    pub fn with_workspace_root(mut self, workspace_root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(workspace_root.into());
+        self
     }
 }
 
@@ -139,10 +228,10 @@ impl MetadataBuffer {
 /// with [`MetadataOptions::timeout`]; on timeout the child is killed and reaped,
 /// but the reader thread is deliberately *not* joined — `cargo metadata` execs
 /// `rustc -vV` and a grandchild may still hold the pipe open past the deadline.
-/// After EOF the child is reaped with an unbounded `wait()`: EOF means every
-/// writer has closed the pipe, so cargo has exited or is about to, and a cargo
-/// that closes its stdout and then blocks is not a failure mode worth a second
-/// timer.
+/// After EOF the child is reaped by polling `try_wait`, bounded by whatever is left
+/// of [`MetadataOptions::timeout`] and never less than two seconds; a cargo that
+/// closes its standard output and then blocks is killed and reported as a timeout
+/// rather than hanging the gate.
 ///
 /// # Errors
 ///
@@ -230,6 +319,7 @@ pub fn cargo_command(options: &MetadataOptions) -> Command {
 }
 
 fn spawn(options: &MetadataOptions) -> Result<MetadataBuffer, Error> {
+    let started = Instant::now();
     let mut child =
         cargo_command(options).spawn().map_err(|source| Error::CargoMetadataSpawn { source })?;
     let Some(mut stdout) = child.stdout.take() else {
@@ -250,11 +340,16 @@ fn spawn(options: &MetadataOptions) -> Result<MetadataBuffer, Error> {
 
     match receiver.recv_timeout(options.timeout) {
         Ok(Ok(buffer)) => {
-            let status = child.wait().map_err(|source| Error::CargoMetadataRead { source })?;
-            if status.success() {
-                Ok(buffer)
-            } else {
-                Err(Error::CargoMetadataFailed { status: status.code() })
+            let budget =
+                options.timeout.checked_sub(started.elapsed()).unwrap_or_default().max(REAP_FLOOR);
+            match reap_bounded(&mut child, budget) {
+                Err(source) => Err(Error::CargoMetadataRead { source }),
+                Ok(None) => {
+                    kill_and_reap(&mut child);
+                    Err(Error::CargoMetadataTimeout { timeout: options.timeout })
+                }
+                Ok(Some(status)) if status.success() => Ok(buffer),
+                Ok(Some(status)) => Err(Error::CargoMetadataFailed { status: status.code() }),
             }
         }
         Ok(Err(source)) => {
@@ -271,6 +366,36 @@ fn spawn(options: &MetadataOptions) -> Result<MetadataBuffer, Error> {
                 source: io::Error::other("the metadata reader thread ended without a result"),
             })
         }
+    }
+}
+
+/// Waits for `child` to exit for at most `budget`, returning `Ok(None)` when it is still
+/// running at the end of it.
+///
+/// The poll interval starts at 100 µs and doubles to [`REAP_POLL_MAX`], so a child that has
+/// already exited is reaped without sleeping and one that lingers costs a handful of
+/// `waitpid` calls per second.
+///
+/// The deadline is computed with [`Instant::checked_add`] because `--cargo-timeout` accepts
+/// any `u64` of seconds and `Instant + Duration` panics on overflow. A budget too large for
+/// the platform clock is effectively infinite, so it degrades to polling on rather than to
+/// an exit outside the documented code contract.
+fn reap_bounded(child: &mut Child, budget: Duration) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now().checked_add(budget);
+    let mut interval = Duration::from_micros(100);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let remaining = match deadline {
+            Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
+                Some(remaining) => remaining,
+                None => return Ok(None),
+            },
+            None => REAP_POLL_MAX,
+        };
+        thread::sleep(interval.min(remaining));
+        interval = (interval * 2).min(REAP_POLL_MAX);
     }
 }
 

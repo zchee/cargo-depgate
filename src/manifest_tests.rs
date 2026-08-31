@@ -418,7 +418,15 @@ fn a_clean_workspace_passes_with_an_empty_report() {
 
     assert!(report.passed());
     let bytes_scanned = u64::try_from(text.len()).expect("fits");
-    assert_eq!(report, ManifestReport { entries: Vec::new(), manifests_scanned: 1, bytes_scanned });
+    assert_eq!(
+        report,
+        ManifestReport {
+            entries: Vec::new(),
+            manifests_scanned: 1,
+            bytes_scanned,
+            root_workspace_dependencies: None,
+        }
+    );
 }
 
 #[test]
@@ -456,6 +464,37 @@ fn a_parse_error_in_the_second_member_aborts_after_the_first_scanned() {
     assert!(matches!(&error, Error::ManifestParse { path, .. } if path == &bad), "{error:?}");
 }
 
+/// The hint the answer drives suggests centralising versions in the root, so a root that
+/// declares `[workspace.dependencies]` and leaves it empty centralises nothing and has to
+/// read as absent; only a table with entries in it withholds the hint.
+#[test]
+fn only_a_populated_workspace_dependencies_table_counts_as_present() {
+    let temp = tempdir().expect("temporary workspace should be creatable");
+    let cases = [
+        ("none", "[workspace]\nmembers = [\"crates/*\"]\n", Some(false)),
+        (
+            "empty",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\n",
+            Some(false),
+        ),
+        (
+            "populated",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nx = \"1\"\n",
+            Some(true),
+        ),
+        ("no-workspace", "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n", Some(false)),
+        ("unparsable", "not toml at all = = =\n", None),
+    ];
+
+    for (label, text, expected) in cases {
+        let manifest = temp.path().join(label).join("Cargo.toml");
+        write(&manifest, text);
+        assert_eq!(root_workspace_dependencies(&manifest), expected, "case {label}");
+    }
+
+    assert_eq!(root_workspace_dependencies(&temp.path().join("absent/Cargo.toml")), None);
+}
+
 fn write(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().expect("manifest paths have a parent"))
         .expect("manifest directory should be creatable");
@@ -464,4 +503,54 @@ fn write(path: &Path, text: &str) {
 
 fn source_of(error: &Error) -> String {
     std::error::Error::source(error).map(ToString::to_string).unwrap_or_default()
+}
+
+/// The caret width the human reporter draws comes from the parser's own token span, so it
+/// stays exact where `version.len() + 2` was wrong: a literal string, a multi-line string
+/// and an escaped basic string all measure differently from the value they carry.
+#[test]
+fn span_bytes_measures_the_version_token_not_the_version_value() {
+    let text = "[dependencies]\n\
+                basic = \"1.0\"\n\
+                literal = '1.0'\n\
+                multiline = \"\"\"1.0\"\"\"\n\
+                escaped = \"1.0\\u002B\"\n\
+                detailed = { version = '2.0' }\n";
+
+    let entries = scan(text);
+    let measured = entries
+        .iter()
+        .map(|entry| (entry.dependency.as_str(), entry.version.as_str(), entry.span_bytes))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        measured,
+        vec![
+            ("basic", "1.0", 5),
+            ("literal", "1.0", 5),
+            ("multiline", "1.0", 9),
+            ("escaped", "1.0+", 11),
+            ("detailed", "2.0", 5),
+        ]
+    );
+}
+
+/// The span has to start at the reported position and cover the whole token, or the
+/// reporter underlines the wrong bytes; slicing the source with it proves both ends.
+#[test]
+fn span_bytes_slices_the_token_out_of_the_source() {
+    let text = "[dependencies]\nliteral = '1.0'\nmultiline = \"\"\"2.0\"\"\"\n";
+
+    let entries = scan(text);
+    let sliced = entries
+        .iter()
+        .map(|entry| {
+            let start =
+                crate::report::human::line_col_to_offset(text, entry.span.line, entry.span.col)
+                    .expect("the reported position exists in the source");
+            &text[start..start + entry.span_bytes]
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(sliced, vec!["'1.0'", "\"\"\"2.0\"\"\""]);
 }

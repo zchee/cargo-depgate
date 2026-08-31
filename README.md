@@ -21,7 +21,7 @@ policy replaces.
 ## Install and run
 
 ```sh
-cargo install --git https://github.com/zchee/cargo-depgate --locked
+cargo install --git https://github.com/zchee/cargo-depgate --locked cargo-depgate
 ```
 
 `cargo depgate schema` prints the JSON Schema of `depgate.toml` and is the one subcommand that needs
@@ -343,7 +343,8 @@ New codes will be added rather than renumbered, because pipelines gate on them.
 ## CI integration
 
 Install the gate in the job first — `cargo install --git https://github.com/zchee/cargo-depgate
---locked`, or restore it from the job's tool cache — and then choose between the two forms below.
+--locked cargo-depgate`, or restore it from the job's tool cache — and then choose between the two
+forms below.
 
 Run one `cargo metadata` for the whole job and let every tool read it. `--metadata-json` consumes an
 existing `cargo metadata` document instead of spawning Cargo, and `--workspace-root` rebases the
