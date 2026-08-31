@@ -146,3 +146,15 @@ what is committed:
 ```sh
 DEPGATE_FIXTURE_CLONES=~/.cache/depgate-fixture-clones scripts/fixture.sh ckb --check
 ```
+
+## Re-pinning a fixture
+
+Every number above is a claim about one upstream commit, so a legitimate upstream change — a
+dependency added, a version finally inherited, a member renamed — moves the pin and moves the
+assertions with it; none of them is relaxed in place. The procedure is the numbered comment block
+at the top of `scripts/fixture.sh`, and that is its only copy: bump the recipe's `commit` and
+`short`, rename the fixture directory, regenerate, copy the printed digest, shape, counters and
+exit code back into the recipe, update the callers the block lists, refresh the `insta` snapshots,
+and finish with `scripts/fixture.sh <example> --check`. Record the old and the new commit in the
+commit message together with what changed upstream to require the move: a message that says only
+"update fixture" leaves the next reader unable to tell an upstream change from a policy regression.

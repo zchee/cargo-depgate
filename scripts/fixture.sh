@@ -14,6 +14,45 @@ set -euo pipefail
 # Clones live outside the repo, under $DEPGATE_FIXTURE_CLONES. They are kept
 # between runs: a regeneration is a `git archive` out of the clone, so the
 # network is touched only for the first clone and for the registry index.
+#
+# Re-pinning an example (the canonical procedure; docs/examples.md points here)
+# -----------------------------------------------------------------------------
+#
+# Every committed number is a claim about one upstream commit. When upstream
+# legitimately changes -- a dependency added, a version finally inherited, a
+# member renamed -- the pin moves and the assertions move with it. No assertion
+# is relaxed in place. In order:
+#
+#  1. Choose the new commit and set `commit` and `short` in this example's
+#     recipe below. `short` names the fixture directory, so `git mv`
+#     tests/fixtures/<example>-<old short> to the new name in the same change.
+#     For ckb, `git rm` its member Cargo.toml files first: generation copies
+#     manifests and never deletes them, so a member dropped upstream would
+#     otherwise survive into the new fixture.
+#  2. Regenerate: DEPGATE_FIXTURE_CLONES=<dir> scripts/fixture.sh <example>.
+#     It aborts if the graph shape moved; that abort names the old and new
+#     shape, and is the diff worth reading before anything is edited.
+#  3. Put the printed `decompressed metadata sha256` into `metadata_sha256` and
+#     the shape from step 2 into `expected_shape`. For ckb also set
+#     `expected_member_count` to the member count the run asserts.
+#  4. Run scripts/fixture.sh <example> --check. Past the digest it runs the gate
+#     and reports its exit status and any counter mismatch; copy those into
+#     `expected_exit` and `expected_counters` and re-run until it is silent.
+#  5. Update everything that spells the old directory or the old numbers:
+#     tests/cli_tests.rs (the LEMMY/CKB/COREUTILS consts and the per-example
+#     counter assertions), scripts/perf.sh (`fixture_root`, `live_commit`),
+#     .github/workflows/ci.yaml (the `gzip -t` list and ckb's tracked-manifest
+#     count), and the commit and counts quoted in README.md, docs/examples.md
+#     and tests/fixtures/<example>.depgate.toml.
+#  6. Refresh the insta snapshots -- INSTA_UPDATE=always cargo nextest run
+#     -E 'binary(cli_tests)', or cargo insta review -- and commit the updated
+#     tests/snapshots/cli_tests__<example>_metadata_check_counters_snapshot.snap.
+#  7. Verify: scripts/fixture.sh <example> --check, then the repository's gate
+#     chain (fmt, clippy, nextest, doc, deny).
+#  8. Record the move in the commit message: old commit -> new commit, and what
+#     changed upstream to require it. A message that says only "update fixture"
+#     leaves the next reader unable to tell an upstream change from a policy
+#     regression.
 
 usage() {
     printf 'usage: %s <lemmy|ckb|coreutils> [--check]\n' "${BASH_SOURCE[0]##*/}" >&2
