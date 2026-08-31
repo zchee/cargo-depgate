@@ -10,7 +10,8 @@
 //! and regardless of `path`, `git` or `workspace` companions. Entries without a
 //! version pass. The reported span is the **version value** itself: the quoted
 //! string in the string form, the `version` value in the table form, as a 1-based
-//! line and character column in the member manifest.
+//! line and character column in the member manifest, together with the token's byte
+//! length so a reporter can underline it without guessing at the quoting.
 //!
 //! `[workspace.dependencies]` is never inspected. Cargo rejects a second
 //! `[workspace]` table in a member, so only the workspace-owning manifest can hold
@@ -57,7 +58,11 @@
 //! A real TOML parse attaches those entries to the top-level `test` array, so the
 //! dependency tables only ever contain dependency entries.
 
-use std::{borrow::Cow, fmt, fs, path::PathBuf};
+use std::{
+    borrow::Cow,
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
 use indexmap::IndexMap;
 use serde::{
@@ -107,6 +112,13 @@ pub struct ManifestViolation {
     pub version: String,
     /// The location of the version value in the member manifest.
     pub span: Span,
+    /// The byte length of the version value token at [`ManifestViolation::span`], quotes
+    /// and escapes included, exactly as the TOML parser reports it.
+    ///
+    /// The human reporter underlines that many bytes. It is not derivable from
+    /// [`ManifestViolation::version`]: a literal string, a multi-line string and any escape
+    /// sequence all make the token longer than the value it carries plus two quotes.
+    pub span_bytes: usize,
 }
 
 /// The result of the manifest rule over every workspace member.
@@ -119,6 +131,13 @@ pub struct ManifestReport {
     pub manifests_scanned: u32,
     /// The total size of the manifests read, in bytes.
     pub bytes_scanned: u64,
+    /// Whether the workspace-owning manifest declares a `[workspace.dependencies]` table,
+    /// when that is known.
+    ///
+    /// [`check_versions_in_root`] leaves it `None`: it is given member manifests, not the
+    /// workspace root. The pipeline fills it in when the rule fails, which is the only case
+    /// a reader is asked to act on, and it drives nothing but the human report's hint.
+    pub root_workspace_dependencies: Option<bool>,
 }
 
 impl ManifestReport {
@@ -183,8 +202,37 @@ pub fn scan_manifest(member: &ManifestInput, text: &str) -> Result<Vec<ManifestV
             dependency: entry.dependency,
             version: entry.version,
             span: crate::config::source_span(&member.path, text, entry.offset),
+            span_bytes: entry.len,
         })
         .collect())
+}
+
+/// Whether the workspace-owning manifest at `path` declares a `[workspace.dependencies]`
+/// table.
+///
+/// Returns `None` when the manifest cannot be read or parsed. The answer only ever drives an
+/// advisory hint, so an unreadable root is reported as unknown rather than as an absent
+/// table: suggesting a configuration change on the strength of a file nobody could read
+/// would be worse than staying quiet.
+#[must_use]
+pub fn root_workspace_dependencies(path: &Path) -> Option<bool> {
+    let text = fs::read_to_string(path).ok()?;
+    let root: RootManifest = toml::from_str(&text).ok()?;
+    Some(root.workspace.is_some_and(|workspace| workspace.dependencies.is_some()))
+}
+
+/// The single table [`root_workspace_dependencies`] asks about; presence is the whole
+/// question, so the value itself is discarded as it is read.
+#[derive(Deserialize)]
+struct RootManifest {
+    #[serde(default)]
+    workspace: Option<RootWorkspace>,
+}
+
+#[derive(Deserialize)]
+struct RootWorkspace {
+    #[serde(default)]
+    dependencies: Option<IgnoredAny>,
 }
 
 /// Renders a dependency table path for one of the three tables under `target`.
@@ -212,6 +260,8 @@ fn quote_key(key: &str) -> Cow<'_, str> {
 
 struct Found {
     offset: usize,
+    /// The byte length of the version value token, quotes included.
+    len: usize,
     table: String,
     dependency: String,
     version: String,
@@ -227,15 +277,18 @@ fn collect_tables(kinds: TableKinds<'_>, target: Option<&str>, found: &mut Vec<F
         }
         let label = table_label(target, kind);
         for (dependency, spec) in table {
-            let (offset, version) = match spec.get_ref() {
-                DepSpec::Simple(version) => (spec.span().start, version.clone()),
+            // The span comes from the parser rather than from the value, so a literal
+            // (`'1'`), a multi-line string or any escape sequence is still measured exactly.
+            let (span, version) = match spec.get_ref() {
+                DepSpec::Simple(version) => (spec.span(), version.clone()),
                 DepSpec::Detailed { version: Some(version) } => {
-                    (version.span().start, version.get_ref().clone())
+                    (version.span(), version.get_ref().clone())
                 }
                 DepSpec::Detailed { version: None } => continue,
             };
             found.push(Found {
-                offset,
+                offset: span.start,
+                len: span.len(),
                 table: label.clone(),
                 dependency: dependency.clone(),
                 version,

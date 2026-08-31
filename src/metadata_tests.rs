@@ -581,6 +581,75 @@ fn timeout_kills_the_child_and_returns_without_joining_the_reader() {
     std::fs::remove_dir_all(dir).expect("cleanup");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_cargo_that_closes_stdout_and_keeps_running_is_killed_and_reported_as_a_timeout() {
+    use std::time::Instant;
+
+    let dir = tempdir("eof-then-hang-cargo");
+    // The document is emitted, stdout is closed so the reader sees EOF, and the process then
+    // keeps running with no writer left on the pipe — the shape a stuck credential helper
+    // leaves behind. Before the bounded reap this returned only when the sleep ended, well
+    // past --cargo-timeout. The emitted bytes are never parsed: the reap expires first.
+    let hanging = write_script(
+        &dir,
+        "eof-then-hang-cargo",
+        "#!/bin/sh\nexec 2>/dev/null\nprintf '%s' '{}'\nexec 1>&-\nsleep 30\nexit 0\n",
+    );
+    let options = MetadataOptions {
+        cargo: Some(hanging),
+        timeout: Duration::from_secs(1),
+        ..MetadataOptions::default()
+    };
+
+    let started = Instant::now();
+    let error = acquire(&options).expect_err("a cargo that never exits must time out");
+    let elapsed = started.elapsed();
+
+    assert_eq!(error.to_string(), "cargo metadata exceeded --cargo-timeout=1s");
+    assert_eq!(error.exit_code(), 3);
+    // The floor, not the remaining share of the one-second timeout, is what bounds this run.
+    assert!(elapsed >= REAP_FLOOR, "returned before the reap floor: {elapsed:?}");
+    assert!(elapsed < REAP_FLOOR * 3, "returned after {elapsed:?}");
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_bounded_reap_returns_the_status_of_a_child_that_has_already_exited() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .spawn()
+        .expect("the shell should spawn");
+
+    let status = reap_bounded(&mut child, Duration::from_secs(5))
+        .expect("waiting on the child should succeed")
+        .expect("a child that exits within the budget is reaped");
+
+    assert_eq!(status.code(), Some(7));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_bounded_reap_gives_up_on_a_child_that_outlives_its_budget() {
+    use std::time::Instant;
+
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "sleep 30"])
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the shell should spawn");
+
+    let started = Instant::now();
+    let outcome = reap_bounded(&mut child, Duration::from_millis(50))
+        .expect("polling the child should succeed");
+    let elapsed = started.elapsed();
+
+    assert!(outcome.is_none(), "the child was still running: {outcome:?}");
+    assert!(elapsed < Duration::from_secs(1), "the budget was not honoured: {elapsed:?}");
+    kill_and_reap(&mut child);
+}
+
 fn tempdir(label: &str) -> PathBuf {
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let unique = format!(

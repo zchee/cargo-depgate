@@ -11,7 +11,9 @@ const ANNOTATION_LIMIT: usize = 10;
 /// Renders at most ten GitHub error annotations followed by the human report.
 ///
 /// Graph-rule failures retain declaration order and take priority over manifest
-/// entries when the annotation cap is reached.
+/// entries when the annotation cap is reached. Annotation paths are anchored at
+/// [`RenderContext::github_workspace`] when it is set and contains the workspace root,
+/// and at the workspace root otherwise.
 ///
 /// # Errors
 ///
@@ -52,7 +54,9 @@ pub fn render(
     for (file, line, col, message) in
         graph_candidates.chain(manifest_candidates).take(ANNOTATION_LIMIT)
     {
-        let relative_file = display_path(file, &outcome.workspace_root).replace('\\', "/");
+        let relative_file =
+            display_path(file, &outcome.workspace_root, ctx.github_workspace.as_deref())
+                .replace('\\', "/");
         writeln!(
             out,
             "::error file={},line={line},col={col}::{}",
@@ -83,7 +87,19 @@ fn first_witness(violation: &Violation, outcome: &crate::pipeline::Outcome) -> O
         .map(|entry| human::render_witness_versionless(&entry.member, &entry.witness))
 }
 
-fn display_path(path: &Path, workspace_root: &Path) -> String {
+/// Renders one annotation path the way GitHub Actions resolves it.
+///
+/// Actions anchors `file=` at the repository checkout, not at the Cargo workspace, and the two
+/// differ whenever the workspace lives in a repository subdirectory. When `$GITHUB_WORKSPACE`
+/// is known and contains the workspace root, the path is emitted relative to it; otherwise it
+/// stays relative to the workspace root, which is the only anchor available off Actions.
+fn display_path(path: &Path, workspace_root: &Path, github_workspace: Option<&Path>) -> String {
+    if let Some(repository_root) = github_workspace
+        && workspace_root.starts_with(repository_root)
+        && let Ok(relative) = path.strip_prefix(repository_root)
+    {
+        return relative.display().to_string();
+    }
     path.strip_prefix(workspace_root).unwrap_or(path).display().to_string()
 }
 

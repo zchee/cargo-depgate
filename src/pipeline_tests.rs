@@ -287,6 +287,37 @@ fn manifest_entries_fail_the_rule_once_after_the_graph_rules() {
     assert!(stderr.is_empty());
 }
 
+/// The human report's first-run hint depends on this answer, so the pipeline has to reach the
+/// workspace-owning manifest and distinguish "no `[workspace.dependencies]` table" from "no
+/// readable manifest at all".
+#[test]
+fn a_failing_manifest_rule_records_whether_the_workspace_centralises_versions() {
+    let centralising = |root_manifest: Option<&str>| {
+        let temp = tempdir().expect("temporary pipeline directory should be creatable");
+        let config_path = temp.path().join("depgate.toml");
+        write(&config_path, "schema = 1\n");
+        write_app_manifest(temp.path(), "dep = { version = \"1.0\", optional = true }\n");
+        if let Some(text) = root_manifest {
+            write(&temp.path().join("Cargo.toml"), text);
+        }
+
+        let (result, _) = run_check(&args(temp.path(), Some(config_path)));
+        let outcome = result.expect("manifest entries are returned as an outcome");
+        let report = outcome.manifest.expect("the enabled rule returns its report");
+        assert!(!report.passed(), "the fixture member names a version");
+        report.root_workspace_dependencies
+    };
+
+    assert_eq!(
+        centralising(Some(
+            "[workspace]\nmembers = [\"app\"]\n\n[workspace.dependencies]\ndep = \"1.0\"\n"
+        )),
+        Some(true)
+    );
+    assert_eq!(centralising(Some("[workspace]\nmembers = [\"app\"]\n")), Some(false));
+    assert_eq!(centralising(None), None, "an unreadable root manifest stays unknown");
+}
+
 #[test]
 fn a_missing_member_manifest_aborts_with_exit_3() {
     let temp = tempdir().expect("temporary pipeline directory should be creatable");

@@ -194,8 +194,17 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
             .members()
             .iter()
             .map(|&node| ManifestInput::new(graph.name(node), graph.manifest_path(node)));
-        let report =
-            timings.measure(Phase::Manifest, || manifest::check_versions_in_root(members))?;
+        let root_manifest = Path::new(meta.workspace_root.as_ref()).join("Cargo.toml");
+        let report = timings.measure(Phase::Manifest, || {
+            let mut report = manifest::check_versions_in_root(members)?;
+            // Only a failing rule asks the reader to do anything, so the extra read of the
+            // workspace-owning manifest stays off the passing path.
+            if !report.passed() {
+                report.root_workspace_dependencies =
+                    manifest::root_workspace_dependencies(&root_manifest);
+            }
+            Ok::<_, Error>(report)
+        })?;
         evaluation.statuses.push(manifest_status(&report));
         Some(report)
     } else {
