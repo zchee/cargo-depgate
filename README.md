@@ -100,6 +100,9 @@ internal = ["acme-core", "acme-store"]
 direct = ["acme-core", "serde", "tokio"]
 
 [rules.acme-core]
+# Answer this table's rules on the closure `acme-core` compiles with no features, instead of
+# on the workspace-unified resolve. Only on an all-features document; see below.
+features = "none"
 internal = ["acme-store"]
 require = ["serde"]
 
@@ -117,6 +120,7 @@ sealed = true
 | `[internal].members` | boolean | `true` | Treat every workspace member as an internal package. |
 | `[internal].patterns` | list of name globs | `[]` | Extra names counted as internal, e.g. `["acme-*"]`. Together with `members` this is the single definition of "internal", and it is used for membership matching only: the `internal` and `leaf` rules ask of each reached name whether it is in that set. Nothing else reads it — witness paths render identically whether or not a hop is internal. |
 | `[manifest].versions-in-root` | boolean | `true` | Enable the manifest rule described below. |
+| `[rules.<package>].features` | `"unified"`, `"none"`, `"default"`, `"all"`, or a list of the package's own features | `"unified"` | Which closure this package's `deny`, `require`, `internal` and `leaf` rules read. `"unified"` is the workspace-wide resolve every rule reads by default. Any other value evaluates them on the closure a build of that package under that selection compiles, derived from the same resolve — see *Package-rooted feature selection* below. `direct` and `sealed` read no closure and are unaffected, so a table that declares only those is rejected rather than silently ignoring the key. |
 | `[rules.<package>].deny` | list of names or globs | unset | Names that must not appear anywhere in the package's closure. The rule's own package name never matches, so a family glob such as `deny = ["acme-*"]` on `rules.acme-app` does not report `acme-app` itself: a self-match is not a dependency finding. |
 | `[rules.<package>].require` | list of names or globs | unset | The dual of `deny`, read on the same closure: every pattern must match at least one name in it, and a failure lists only the patterns that matched nothing. The rule's own package name never satisfies a pattern, so `require` always asks for a dependency. |
 | `[rules.<package>].internal` | list of exact names | unset | The exact set of internal names the closure may contain. The rule's own package name is skipped here too, so it is neither required in the set nor reported as `+extra`. |
@@ -132,10 +136,35 @@ JSON Schema for editor completion.
 Validation happens in two groups. The graph-independent group covers TOML syntax, the `schema`
 value, unknown keys, the empty-policy case, `leaf` together with `internal`, a package listing
 itself in its own `internal` set, a `[graph].features` value that is neither `default`, `all` nor a
-feature list, and glob compilation. The graph-dependent group additionally
+feature list, a `[rules.<package>].features` value outside the five it accepts, and glob
+compilation. The graph-dependent group additionally
 requires that every `[rules.<package>]` key names a workspace member and that every `internal` and
 `direct` entry names a package present in the resolved graph — these are exact sets, so globs are
-not accepted there. Both groups exit 2 and point at the offending line and column in `depgate.toml`.
+not accepted there. It also rejects a `features` list naming a feature the package does not
+declare, and any feature-aware rule at all on a document that was not resolved with every
+member's features (see below). Both groups exit 2 and point at the offending line and column in
+`depgate.toml`.
+
+### Package-rooted feature selection
+
+`cargo metadata` resolves features **once for the whole workspace**: the union over every member,
+every dependency kind and every platform. A `[rules.<package>].features` value other than
+`"unified"` re-runs Cargo's feature resolution from that one package over the same document, and
+the rule is then answered on the edges that activation enables — the question
+`cargo tree -p <package> --no-default-features -i <name>` asks, without a second resolve and
+without compiling anything.
+
+That narrowing is sound only when every edge the activation could enable is in the document, which
+holds exactly when every workspace member was resolved with all of its own features. That is
+checked against the document itself: a feature-aware rule on any other document is exit 2 naming
+the first member that proves it, because a `deny` rule passing for want of an edge is a false pass.
+Resolve with `--all-features` (or `[graph].features = "all"`) to satisfy it.
+
+The two divergences from `cargo tree` that remain are the ones the gap table already records: the
+closure keeps every platform's edges, and it is rooted at the package rather than at a build, so
+the root's own dev-dependencies — which a bare `cargo tree -p P` includes — stay out. A rule that
+narrows reports the selection it used and how many names it removed; the names themselves are in
+the JSON report, as `features` and `activation_pruned` on the rule's record.
 
 ### The graph the rules see
 
