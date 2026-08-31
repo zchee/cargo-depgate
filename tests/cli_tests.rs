@@ -1863,3 +1863,114 @@ fn feature_flags_warn_when_metadata_json_makes_them_inert() {
          --metadata-json; the JSON was produced with its own feature selection"
     );
 }
+
+#[test]
+fn a_feature_aware_rule_is_refused_on_a_default_features_document() {
+    // The committed examples were resolved with default features, so every one of them fails
+    // the premise an activation walk needs. Exit 2 names the first member that proves it.
+    let (_temp, metadata) = example_metadata_json(&LEMMY);
+    let config_dir = tempfile::tempdir().expect("temporary guard config should be creatable");
+    let config = config_dir.path().join("depgate.toml");
+    fs::write(
+        &config,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.lemmy_api_common]\n\
+         features = \"none\"\ndeny = [\"diesel\"]\n",
+    )
+    .expect("guard config should be writable");
+
+    let output = metadata_check(&metadata, &config, Some(&LEMMY.fixture_root()), &[]);
+
+    assert_eq!(output.status.code(), Some(2), "the guard is a configuration error: {output:?}");
+    let stderr = cleaned_stderr(&output);
+    assert!(
+        stderr.contains("feature-aware rules need a graph resolved with all features; member "),
+        "the guard names the member it rejected on: {stderr}"
+    );
+    assert!(
+        stderr.contains("re-run with --all-features"),
+        "the guard says how to fix it: {stderr}"
+    );
+}
+
+#[test]
+fn a_feature_aware_deny_narrows_the_closure_end_to_end() {
+    // The whole chain on one workspace: `[graph].features = "all"` satisfies the guard, and
+    // `features = "none"` then answers `deny` on the closure a default build compiles.
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let config_dir = tempfile::tempdir().expect("temporary feature config should be creatable");
+    let policy = |selection: &str| {
+        format!(
+            "schema = 1\n\n[graph]\nfeatures = \"all\"\n\n[manifest]\nversions-in-root = false\n\n\
+             [rules.app]\nfeatures = {selection}\ndeny = [\"reqwest-like\"]\n"
+        )
+    };
+
+    let narrowed = config_dir.path().join("narrowed.toml");
+    fs::write(&narrowed, policy("\"none\"")).expect("narrowed config should be writable");
+    let output = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &narrowed,
+        &["--format", "json"],
+        false,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--no-default-features never enables `net`, so the edge is not compiled: {output:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("narrowed report should be JSON");
+    assert_eq!(report["counters"]["violations"].as_u64(), Some(0));
+    assert_eq!(
+        report["features"],
+        serde_json::json!("all"),
+        "the document is still the all-features resolve the guard demands"
+    );
+
+    let human = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &narrowed,
+        &["--format", "human"],
+        false,
+    );
+    assert_eq!(
+        cleaned_stdout(&human).lines().next(),
+        Some("ok rules.app.deny (features = \"none\", 1 pruned)"),
+        "a rule that passes by narrowing says so: {human:?}"
+    );
+
+    let selected = config_dir.path().join("selected.toml");
+    fs::write(&selected, policy("[\"net\"]")).expect("selected config should be writable");
+    let fired = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &selected,
+        &["--format", "json"],
+        false,
+    );
+    assert_eq!(
+        fired.status.code(),
+        Some(1),
+        "the same rule still fires when its selection activates the edge: {fired:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&fired.stdout).expect("selected report should be JSON");
+    let violation = &report["violations"][0];
+    assert_eq!(violation["rule_id"], "rules.app.deny");
+    assert_eq!(violation["matches"][0]["name"], "reqwest-like");
+    assert_eq!(violation["features"], serde_json::json!(["net"]));
+    assert_eq!(violation["activation_pruned"], serde_json::json!([]));
+}
+
+#[test]
+fn a_unified_rule_carries_no_feature_fields_in_its_json_record() {
+    // AC 1 in the report shape: the keys a feature-aware rule adds stay absent everywhere else.
+    let output =
+        fixture_check_with_options(&violations_fixture_root(), &["--format", "json"], false);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("violations report should be JSON");
+
+    for violation in report["violations"].as_array().expect("report should carry violations") {
+        assert!(violation.get("features").is_none(), "unified rules add no features key");
+        assert!(violation.get("activation_pruned").is_none(), "and no pruning key");
+    }
+}

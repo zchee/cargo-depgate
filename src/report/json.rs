@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::{
     config::{FeatureSelection, Span},
+    features::Selection,
     manifest,
     rules::{Match, SealedEntry, Violation, WitnessHop},
     timings::{Counters, Phase},
@@ -148,6 +149,10 @@ impl<'a> From<&'a SealedEntry> for SealedJson<'a> {
 
 /// The `sealed_by` array is always present so sealed violations remain representable,
 /// extending the compressed report shape that listed only deny and exact-set evidence.
+///
+/// `features` and `activation_pruned` are the exception: they are absent for a rule evaluated
+/// on the workspace-unified closure, which keeps every report a policy without feature-aware
+/// rules produces byte-identical to the one it produced before the key existed.
 #[derive(Serialize)]
 struct ViolationJson<'a> {
     rule_id: &'a str,
@@ -158,6 +163,10 @@ struct ViolationJson<'a> {
     missing: &'a [String],
     sealed_by: Vec<SealedJson<'a>>,
     span: SpanJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation_pruned: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,6 +186,11 @@ impl<'a> ViolationJson<'a> {
             missing: &violation.missing,
             sealed_by: violation.sealed_by.iter().map(SealedJson::from).collect(),
             span: span_json(&violation.span, workspace_root),
+            features: violation.features.as_ref().map(selection_json),
+            activation_pruned: violation
+                .features
+                .as_ref()
+                .map(|_| violation.activation_pruned.as_slice()),
             table: None,
             dependency: None,
             version: None,
@@ -193,6 +207,8 @@ impl<'a> ViolationJson<'a> {
             missing: &[],
             sealed_by: Vec::new(),
             span: span_json(&entry.span, workspace_root),
+            features: None,
+            activation_pruned: None,
             table: Some(&entry.table),
             dependency: Some(&entry.dependency),
             version: Some(&entry.version),
@@ -237,6 +253,18 @@ fn features_json(features: Option<&FeatureSelection>) -> serde_json::Value {
         Some(FeatureSelection::Default) => serde_json::Value::String("default".to_owned()),
         Some(FeatureSelection::All) => serde_json::Value::String("all".to_owned()),
         Some(FeatureSelection::List(features)) => serde_json::Value::Array(
+            features.iter().cloned().map(serde_json::Value::String).collect(),
+        ),
+    }
+}
+
+/// One rule's effective feature selection, spelled the way the policy key spells it.
+fn selection_json(selection: &Selection) -> serde_json::Value {
+    match selection {
+        Selection::None => serde_json::Value::String("none".to_owned()),
+        Selection::Default => serde_json::Value::String("default".to_owned()),
+        Selection::All => serde_json::Value::String("all".to_owned()),
+        Selection::List(features) => serde_json::Value::Array(
             features.iter().cloned().map(serde_json::Value::String).collect(),
         ),
     }

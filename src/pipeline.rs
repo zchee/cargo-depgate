@@ -320,6 +320,8 @@ fn manifest_status(report: &ManifestReport) -> RuleStatus {
         kind: manifest::RULE_KIND,
         passed: report.passed(),
         matched: count(report.entries.len()),
+        features: None,
+        activation_pruned: Vec::new(),
     }
 }
 

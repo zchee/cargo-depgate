@@ -57,12 +57,25 @@ pub fn render(
 }
 
 fn render_pass(status: &RuleStatus, color: bool, out: &mut dyn Write) -> io::Result<()> {
+    let closure = pass_closure(status);
     if color {
         let style = Style::new().fg_color(Some(AnsiColor::Green.into()));
-        writeln!(out, "{}ok {}{}", style.render(), status.id, style.render_reset())
+        writeln!(out, "{}ok {}{closure}{}", style.render(), status.id, style.render_reset())
     } else {
-        writeln!(out, "ok {}", status.id)
+        writeln!(out, "ok {}{closure}", status.id)
     }
+}
+
+/// The closure note a passing feature-aware rule carries, and nothing at all for a rule that
+/// read the workspace-unified closure.
+///
+/// A rule that passes because its selection compiled the offending name out looks exactly like
+/// one that passes because the name was never there, so the line says which closure answered
+/// and how much of the unified one it dropped. The names themselves are in the JSON report.
+fn pass_closure(status: &RuleStatus) -> String {
+    status.features.as_ref().map_or_else(String::new, |features| {
+        format!(" (features = {features}, {} pruned)", status.activation_pruned.len())
+    })
 }
 
 fn render_manifest_failure(

@@ -29,7 +29,15 @@ fn status(
     passed: bool,
     matched: u32,
 ) -> RuleStatus {
-    RuleStatus { id: id.to_owned(), package: package.map(str::to_owned), kind, passed, matched }
+    RuleStatus {
+        id: id.to_owned(),
+        package: package.map(str::to_owned),
+        kind,
+        passed,
+        matched,
+        features: None,
+        activation_pruned: Vec::new(),
+    }
 }
 
 fn span(root: &Path, file: &str, line: u32, col: u32) -> Span {
@@ -73,6 +81,8 @@ fn graph_violation(root: &Path, id: &str, kind: &'static str) -> Violation {
         missing: Vec::new(),
         sealed_by: Vec::new(),
         span: span(root, "missing-depgate.toml", 3, 5),
+        features: None,
+        activation_pruned: Vec::new(),
     }
 }
 

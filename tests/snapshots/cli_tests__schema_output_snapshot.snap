@@ -73,6 +73,17 @@ expression: cleaned_stdout(&output)
             "null"
           ]
         },
+        "features": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FeatureValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Feature selection for this rule's closure: `unified` (the default), `none`,\n`default`, `all`, or a list of this package's own features."
+        },
         "internal": {
           "default": null,
           "description": "Exact package names required to be internal.",

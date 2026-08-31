@@ -69,7 +69,7 @@
 //! Each of those widens the closure, and widening cannot hide a `deny` finding. The
 //! differential test against guppy pins both directions on every fixture member.
 
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{borrow::Cow, collections::BTreeSet, fmt};
 
 use fixedbitset::FixedBitSet;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -94,6 +94,27 @@ pub enum Selection {
     /// An explicit list, resolved as `--no-default-features --features …`: `default` is
     /// active only when the list names it.
     List(Vec<String>),
+}
+
+impl fmt::Display for Selection {
+    /// Writes the selection the way a policy spells it, so a report can echo the key back.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => formatter.write_str("\"none\""),
+            Self::Default => formatter.write_str("\"default\""),
+            Self::All => formatter.write_str("\"all\""),
+            Self::List(features) => {
+                formatter.write_str("[")?;
+                for (index, feature) in features.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{feature:?}")?;
+                }
+                formatter.write_str("]")
+            }
+        }
+    }
 }
 
 /// What one package-rooted walk turned on: the activated nodes and the normal CSR edges
@@ -161,6 +182,9 @@ pub struct UnactivatedMember {
 /// restricted to what the document's unified resolve contains — see the module
 /// documentation for the four ways that is deliberately wider than `cargo tree`.
 ///
+/// Every call allocates its own walk state. Evaluate several selections over one graph
+/// through a single [`Walk`] instead, which keeps the per-package decode caches.
+///
 /// # Errors
 ///
 /// Returns [`Error::CargoMetadataUnparseable`] when a package's raw `dependencies` or
@@ -170,10 +194,7 @@ pub struct UnactivatedMember {
 ///
 /// Panics if `root` is not a node of `graph`.
 pub fn activate(graph: &Graph<'_>, root: u32, selection: &Selection) -> Result<Activation, Error> {
-    assert!(root < graph.node_count(), "root {root} is not a node");
-    let mut walk = Walk::new(graph);
-    walk.run(root, selection)?;
-    Ok(Activation { root, nodes: walk.nodes, edges: walk.edges })
+    Walk::new(graph).activate(root, selection)
 }
 
 /// The first workspace member whose declared features the resolve did not fully activate.
@@ -209,6 +230,26 @@ pub fn first_unactivated_member(graph: &Graph<'_>) -> Result<Option<UnactivatedM
         }
     }
     Ok(None)
+}
+
+/// The first entry of `requested` that `node`'s own `[features]` table does not define.
+///
+/// A selection may name an optional dependency, because cargo materialises that dependency's
+/// implicit feature into the table (see [`crate::metadata::Pkg::features`]); anything else names
+/// a feature the root cannot enable, which would activate nothing and narrow the closure for a
+/// reason the policy did not intend.
+///
+/// # Errors
+///
+/// Returns [`Error::CargoMetadataUnparseable`] when the package's raw `features` slice is
+/// malformed.
+pub fn first_undeclared_feature<'r>(
+    graph: &Graph<'_>,
+    node: u32,
+    requested: &'r [String],
+) -> Result<Option<&'r str>, Error> {
+    let table = feature_table(graph, node)?;
+    Ok(requested.iter().map(String::as_str).find(|feature| !table.contains_key(*feature)))
 }
 
 /// One package's declared `[features]` table, borrowed from the JSON where it can be.
@@ -249,7 +290,14 @@ enum Task {
     Feature(u32, String),
 }
 
-struct Walk<'g, 'm> {
+/// A reusable activation walk over one graph.
+///
+/// Each [`Walk::activate`] resets the state one run owns and **keeps** the per-package decode
+/// caches, so a policy with several feature-aware rules decodes each package's `dependencies`
+/// and `[features]` slices once rather than once per rule, and pays the per-node allocation of
+/// those caches once rather than per rule. Build one per graph; a walk borrows the graph and
+/// the document it was built from.
+pub struct Walk<'g, 'm> {
     graph: &'g Graph<'m>,
     /// Per node, the decoded `dependencies` array; empty until the node is touched, so a
     /// walk that reaches a tenth of the graph decodes a tenth of the declarations.
@@ -276,7 +324,9 @@ struct Walk<'g, 'm> {
 }
 
 impl<'g, 'm> Walk<'g, 'm> {
-    fn new(graph: &'g Graph<'m>) -> Self {
+    /// Allocates walk state sized for `graph`.
+    #[must_use]
+    pub fn new(graph: &'g Graph<'m>) -> Self {
         let nodes = graph.node_count() as usize;
         let edges = graph.edge_count() as usize;
         Self {
@@ -293,6 +343,41 @@ impl<'g, 'm> Walk<'g, 'm> {
             pending: FxHashMap::default(),
             queue: Vec::new(),
         }
+    }
+
+    /// Runs one walk from `root` and returns what it turned on.
+    ///
+    /// See [`activate`] for the semantics; this is the same walk with the decode caches of
+    /// earlier runs still warm.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CargoMetadataUnparseable`] when a package's raw `dependencies` or
+    /// `features` slice is malformed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `root` is not a node of the graph this walk was built for.
+    pub fn activate(&mut self, root: u32, selection: &Selection) -> Result<Activation, Error> {
+        assert!(root < self.graph.node_count(), "root {root} is not a node");
+        self.reset();
+        self.run(root, selection)?;
+        Ok(Activation { root, nodes: self.nodes.clone(), edges: self.edges.clone() })
+    }
+
+    /// Clears everything one run owns, keeping the decode caches (`declarations`, `tables`,
+    /// `suppressed` and the `decoded` bitset that guards them), which depend on the document
+    /// alone and so stay valid for every root and every selection.
+    fn reset(&mut self) {
+        self.nodes.clear();
+        self.edges.clear();
+        for features in &mut self.active_features {
+            features.clear();
+        }
+        self.active_dependencies.clear();
+        self.dependency_targets.clear();
+        self.pending.clear();
+        self.queue.clear();
     }
 
     fn run(&mut self, root: u32, selection: &Selection) -> Result<(), Error> {
@@ -374,16 +459,29 @@ impl<'g, 'm> Walk<'g, 'm> {
         }
     }
 
-    /// The library names every normal declaration of `package` on `node` claims.
+    /// The library names every normal declaration of each package in `packages` claims on
+    /// `node`, in one pass over that node's declarations.
     ///
-    /// An edge whose own library name is absent from this set is one cargo renamed through
-    /// `[lib] name`, which no declaration can spell; see [`edge_belongs`].
-    fn claimed_library_names(&self, node: u32, package: &str) -> FxHashSet<String> {
-        self.declarations[node as usize]
-            .iter()
-            .filter(|declaration| declaration.is_normal() && declaration.name == package)
-            .map(|declaration| library_name(declaration.extern_name()))
-            .collect()
+    /// An edge whose own library name is absent from its package's set is one cargo renamed
+    /// through `[lib] name`, which no declaration can spell; see [`edge_belongs`]. The answer is
+    /// per package, not per declaration, so it is collected once for the whole expansion rather
+    /// than re-scanned for each declaration that shares a package.
+    fn claimed_library_names(
+        &self,
+        node: u32,
+        packages: impl IntoIterator<Item = String>,
+    ) -> FxHashMap<String, FxHashSet<String>> {
+        let mut claimed: FxHashMap<String, FxHashSet<String>> =
+            packages.into_iter().map(|package| (package, FxHashSet::default())).collect();
+        for declaration in &self.declarations[node as usize] {
+            if !declaration.is_normal() {
+                continue;
+            }
+            if let Some(names) = claimed.get_mut(declaration.name.as_ref()) {
+                names.insert(library_name(declaration.extern_name()));
+            }
+        }
+        claimed
     }
 
     /// Requests `feature` on whatever `name` resolved to, deferring until it resolves.
@@ -435,15 +533,18 @@ impl<'g, 'm> Walk<'g, 'm> {
             })
             .collect::<Vec<_>>();
 
+        let claimed_by_package =
+            self.claimed_library_names(node, matching.iter().map(|(package, ..)| package.clone()));
+
         let mut targets = Vec::new();
         for (package, uses_default, features) in matching {
-            let claimed = self.claimed_library_names(node, &package);
+            let claimed = &claimed_by_package[&package];
             for edge in self.graph.edges_from(node) {
                 let target = self.graph.edge_target(edge);
                 if self.graph.name(target) != package {
                     continue;
                 }
-                if !edge_belongs(self.graph.edge_extern_name(edge), &wanted, &claimed) {
+                if !edge_belongs(self.graph.edge_extern_name(edge), &wanted, claimed) {
                     continue;
                 }
                 self.edges.insert(edge as usize);

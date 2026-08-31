@@ -11,6 +11,7 @@ patterns = ["workspace-*"]
 versions-in-root = false
 
 [rules."workspace-app"]
+features = "unified"
 deny = ["openssl", "ring*"]
 require = ["serde"]
 internal = ["workspace-core"]

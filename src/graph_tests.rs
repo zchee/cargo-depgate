@@ -674,3 +674,43 @@ fn reach_panics_on_an_unknown_root() {
 
     graph.reach(99, &mut scratch);
 }
+
+#[test]
+fn an_activated_reach_follows_only_the_masked_edges_and_keeps_their_witnesses() {
+    let graph = fixture_graph();
+    let mut scratch = Scratch::new(&graph);
+    let mut every_edge = FixedBitSet::with_capacity(graph.edge_count() as usize);
+    every_edge.insert_range(..);
+
+    {
+        let full = graph.reach_activated(0, &every_edge, &mut scratch);
+        assert_eq!(full.nodes().ones().collect::<Vec<_>>(), [0, 1, 2, 3]);
+        assert_eq!(full.witness_to_node(3), Some(vec![0, 1, 3]));
+        assert_eq!(full.direction(), Direction::Forward);
+    }
+
+    // Masking out the one edge the witness to node 3 runs through leaves node 3 unreachable
+    // even though every other edge into its subtree is still there.
+    let mut without_first_hop = every_edge.clone();
+    let hop = graph.edge_between(0, 1).expect("the fixture has a 0 -> 1 edge");
+    without_first_hop.set(hop as usize, false);
+    {
+        let narrowed = graph.reach_activated(0, &without_first_hop, &mut scratch);
+        assert!(!narrowed.contains_node(1) && !narrowed.contains_node(3));
+        assert_eq!(narrowed.witness_to_node(3), None);
+    }
+
+    let empty = FixedBitSet::with_capacity(graph.edge_count() as usize);
+    let isolated = graph.reach_activated(0, &empty, &mut scratch);
+    assert_eq!(isolated.nodes().ones().collect::<Vec<_>>(), [0], "the root is always activated");
+}
+
+#[test]
+#[should_panic(expected = "the activation mask belongs to another graph")]
+fn an_activated_reach_refuses_a_mask_sized_to_another_graph() {
+    let graph = fixture_graph();
+    let mut scratch = Scratch::new(&graph);
+    let short = FixedBitSet::with_capacity(graph.edge_count() as usize - 1);
+
+    graph.reach_activated(0, &short, &mut scratch);
+}

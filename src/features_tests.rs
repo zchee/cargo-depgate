@@ -927,3 +927,27 @@ fn a_declared_feature_shadows_the_implicit_feature_of_the_dependency_it_is_named
         "`tdep/macros` is what reaches the dependency, exactly as cargo resolves it"
     );
 }
+
+#[test]
+fn one_walk_reused_across_selections_answers_as_a_fresh_walk_would() {
+    // The walk keeps its decode caches between runs, so every other piece of state has to be
+    // reset: a leaked feature, dependency or edge would narrow the next rule's closure wrongly.
+    let workspace = dep_syntax_workspace();
+    let graph = workspace.graph();
+    let app = member(&graph, "app");
+    let selections = [
+        Selection::None,
+        Selection::List(vec!["net".to_owned()]),
+        Selection::Default,
+        Selection::All,
+        Selection::None,
+        Selection::List(vec!["net".to_owned()]),
+    ];
+
+    let mut walk = Walk::new(&graph);
+    for selection in &selections {
+        let reused = walk.activate(app, selection).expect("the reused walk runs");
+        let fresh = activate(&graph, app, selection).expect("a fresh walk runs");
+        assert_eq!(reused, fresh, "reuse must not change the answer for {selection}");
+    }
+}

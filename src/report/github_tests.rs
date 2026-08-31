@@ -26,6 +26,8 @@ fn status(id: &str, kind: &'static str, passed: bool) -> RuleStatus {
         kind,
         passed,
         matched: u32::from(!passed),
+        features: None,
+        activation_pruned: Vec::new(),
     }
 }
 
@@ -49,6 +51,8 @@ fn violation(id: &str, file: impl Into<PathBuf>, line: u32) -> Violation {
         missing: Vec::new(),
         sealed_by: Vec::new(),
         span: span(file, line),
+        features: None,
+        activation_pruned: Vec::new(),
     }
 }
 
@@ -180,6 +184,8 @@ fn sealed_annotation_matches_the_version_free_human_body_convention() {
             }],
         }],
         span: span(PathBuf::from(WORKSPACE).join("depgate.toml"), 2),
+        features: None,
+        activation_pruned: Vec::new(),
     }];
     sealed_outcome.counters =
         Counters { rules: 1, violations: 1, matches: 1, ..Counters::default() };

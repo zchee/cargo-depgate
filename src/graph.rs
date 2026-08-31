@@ -488,7 +488,36 @@ impl<'m> Graph<'m> {
     pub fn reach<'s>(&'s self, root: u32, scratch: &'s mut Scratch) -> Reach<'s, 'm> {
         assert!((root as usize) < self.forward.node_count(), "root {root} is not a node");
         scratch.prepare(self);
-        self.bfs(&self.forward, None, root, scratch);
+        self.bfs(&self.forward, None, root, scratch, None);
+        Reach { graph: self, scratch, root, direction: Direction::Forward }
+    }
+
+    /// Runs one forward BFS from `root` over the edges `activated` selects.
+    ///
+    /// `activated` is a bitset over CSR edge ids — an [`crate::features::Activation`]'s edge
+    /// set — so the reach is the closure a build of `root` under that feature selection would
+    /// compile, with the witnesses [`Graph::reach`] produces on the unified graph. An edge the
+    /// activation left out is not traversed and does not enter the superset-edge union either:
+    /// it is not part of this rule's closure at all.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `root` is not a node of this graph, or if `activated` is not sized to its
+    /// edges — a mask from another graph would silently truncate.
+    pub fn reach_activated<'s>(
+        &'s self,
+        root: u32,
+        activated: &FixedBitSet,
+        scratch: &'s mut Scratch,
+    ) -> Reach<'s, 'm> {
+        assert!((root as usize) < self.forward.node_count(), "root {root} is not a node");
+        assert_eq!(
+            activated.len(),
+            self.forward.adj.len(),
+            "the activation mask belongs to another graph"
+        );
+        scratch.prepare(self);
+        self.bfs(&self.forward, None, root, scratch, Some(activated));
         Reach { graph: self, scratch, root, direction: Direction::Forward }
     }
 
@@ -505,11 +534,18 @@ impl<'m> Graph<'m> {
         assert!((root as usize) < self.forward.node_count(), "root {root} is not a node");
         scratch.prepare(self);
         let transposed = self.transposed();
-        self.bfs(&transposed.csr, Some(&transposed.forward_edge), root, scratch);
+        self.bfs(&transposed.csr, Some(&transposed.forward_edge), root, scratch, None);
         Reach { graph: self, scratch, root, direction: Direction::Reverse }
     }
 
-    fn bfs(&self, csr: &Csr, forward_edge: Option<&[u32]>, root: u32, scratch: &mut Scratch) {
+    fn bfs(
+        &self,
+        csr: &Csr,
+        forward_edge: Option<&[u32]>,
+        root: u32,
+        scratch: &mut Scratch,
+        activated: Option<&FixedBitSet>,
+    ) {
         scratch.visited.clear();
         scratch.reach.clear();
         scratch.queue.clear();
@@ -526,6 +562,9 @@ impl<'m> Graph<'m> {
             for edge in csr.range(from) {
                 let to = csr.adj[edge];
                 let forward = forward_edge.map_or(edge, |map| map[edge] as usize);
+                if activated.is_some_and(|activated| !activated.contains(forward)) {
+                    continue;
+                }
                 if self.edge_cfg_only.contains(forward)
                     || self.edge_member_optional.contains(forward)
                 {
