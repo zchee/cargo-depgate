@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, fs};
 use crate::{
     config::{FeatureSelection, Span},
     features::Selection,
-    manifest::{ManifestReport, ManifestViolation},
+    manifest::{self, ManifestReport, ManifestViolation},
     pipeline::Outcome,
     rules::{Match, SealedEntry},
     timings::{Counters, Timings},
@@ -15,12 +15,7 @@ use crate::{
 use super::*;
 
 fn context(workspace_root: &Path) -> RenderContext {
-    RenderContext {
-        workspace_root: workspace_root.to_path_buf(),
-        tool: "cargo-depgate",
-        version: "test",
-        color: false,
-    }
+    RenderContext::new(workspace_root.to_path_buf(), "cargo-depgate", "test", false)
 }
 
 fn status(
@@ -249,8 +244,14 @@ fn manifest_failure_uses_source_annotation_when_file_is_readable() {
         dependency: "serde".to_owned(),
         version: "1.0".to_owned(),
         span: Span { file: manifest_path, line: 2, col: 9 },
+        span_bytes: 5,
     };
-    let report = ManifestReport { entries: vec![entry], manifests_scanned: 1, bytes_scanned: 31 };
+    let report = ManifestReport {
+        entries: vec![entry],
+        manifests_scanned: 1,
+        bytes_scanned: 31,
+        root_workspace_dependencies: None,
+    };
     let outcome = outcome(
         temp.path(),
         vec![status(manifest::RULE_ID, None, manifest::RULE_KIND, false, 1)],
@@ -274,8 +275,14 @@ fn manifest_failure_falls_back_when_file_cannot_be_read() {
         dependency: "assert_cmd".to_owned(),
         version: "2".to_owned(),
         span: span(root, "missing-Cargo.toml", 7, 11),
+        span_bytes: 3,
     };
-    let report = ManifestReport { entries: vec![entry], manifests_scanned: 1, bytes_scanned: 0 };
+    let report = ManifestReport {
+        entries: vec![entry],
+        manifests_scanned: 1,
+        bytes_scanned: 0,
+        root_workspace_dependencies: None,
+    };
     let outcome = outcome(
         root,
         vec![status(manifest::RULE_ID, None, manifest::RULE_KIND, false, 1)],
@@ -394,4 +401,65 @@ fn a_unified_rule_adds_no_closure_note_to_its_label() {
     let status = status("rules.app.deny", Some("app"), "deny", false, 1);
 
     assert_eq!(violation_label(&status, Some(&violation)), "1 match(es)");
+}
+
+/// The first-run hint is the only line in the report that talks about configuration rather
+/// than about the workspace, so it has to appear exactly when the reader can act on it: the
+/// manifest rule failed and the workspace has no `[workspace.dependencies]` table.
+#[test]
+fn the_manifest_hint_follows_a_failure_only_when_the_workspace_centralises_nothing() {
+    let root = Path::new("/workspace");
+    let hinted = |root_workspace_dependencies| {
+        let entry = ManifestViolation {
+            package: "app".to_owned(),
+            table: "dependencies".to_owned(),
+            dependency: "tempfile".to_owned(),
+            version: "3".to_owned(),
+            span: span(root, "missing-Cargo.toml", 7, 11),
+            span_bytes: 3,
+        };
+        let report = ManifestReport {
+            entries: vec![entry],
+            manifests_scanned: 1,
+            bytes_scanned: 0,
+            root_workspace_dependencies,
+        };
+        let outcome = outcome(
+            root,
+            vec![status(manifest::RULE_ID, None, manifest::RULE_KIND, false, 1)],
+            vec![],
+            Some(report),
+            1,
+        );
+        render_text(&outcome).contains("hint: set [manifest] versions-in-root = false")
+    };
+
+    assert!(
+        hinted(Some(false)),
+        "a workspace without the table should be told the rule is opt-out"
+    );
+    assert!(!hinted(Some(true)), "a workspace that centralises versions asked for this rule");
+    assert!(!hinted(None), "an unreadable root manifest is not evidence of anything");
+}
+
+#[test]
+fn a_passing_manifest_rule_prints_no_hint() {
+    let root = Path::new("/workspace");
+    let report = ManifestReport {
+        entries: Vec::new(),
+        manifests_scanned: 1,
+        bytes_scanned: 0,
+        root_workspace_dependencies: Some(false),
+    };
+    let outcome = outcome(
+        root,
+        vec![status(manifest::RULE_ID, None, manifest::RULE_KIND, true, 0)],
+        vec![],
+        Some(report),
+        0,
+    );
+
+    let rendered = render_text(&outcome);
+
+    assert!(rendered.ends_with("ok: 1 rules, 0 violations\n"), "{rendered}");
 }

@@ -12,7 +12,7 @@ use std::{
     fmt::Write as _,
     fs::{self, File},
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{LazyLock, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -318,25 +318,17 @@ fn real_pipeline(bencher: Bencher) {
 }
 
 fn real_check_args() -> CheckArgs {
-    CheckArgs {
-        metadata: MetadataOptions {
-            source: Some(MetadataSource::File(REAL_METADATA_TEMP.path().join("metadata.json"))),
-            workspace_root: Some(PathBuf::from(REAL_FIXTURE_ROOT)),
-            ..MetadataOptions::default()
-        },
-        config_path: Some(PathBuf::from(REAL_CONFIG_PATH)),
-    }
+    let metadata = MetadataOptions::default()
+        .with_source(MetadataSource::File(REAL_METADATA_TEMP.path().join("metadata.json")))
+        .with_workspace_root(REAL_FIXTURE_ROOT);
+    CheckArgs::new(metadata).with_config_path(REAL_CONFIG_PATH)
 }
 
 fn synthetic_check_args(temp: &tempfile::TempDir) -> CheckArgs {
-    CheckArgs {
-        metadata: MetadataOptions {
-            source: Some(MetadataSource::File(temp.path().join("metadata.json"))),
-            workspace_root: Some(temp.path().to_path_buf()),
-            ..MetadataOptions::default()
-        },
-        config_path: Some(temp.path().join("depgate.toml")),
-    }
+    let metadata = MetadataOptions::default()
+        .with_source(MetadataSource::File(temp.path().join("metadata.json")))
+        .with_workspace_root(temp.path());
+    CheckArgs::new(metadata).with_config_path(temp.path().join("depgate.toml"))
 }
 
 #[divan::bench(sample_count = 5, sample_size = 1)]

@@ -624,3 +624,13 @@ deny = ["dep"]
     validate(&raw, Some(&featured_graph("")))
         .expect("a policy without a features key is unaffected by the document's selection");
 }
+
+/// `Span` is `#[non_exhaustive]`, so a downstream reporter rendering its own configuration
+/// diagnostics can only build one through this constructor.
+#[test]
+fn span_new_carries_the_file_and_the_one_based_position() {
+    let span = Span::new("depgate.toml", 4, 13);
+
+    assert_eq!(span, Span { file: PathBuf::from("depgate.toml"), line: 4, col: 13 });
+    assert_eq!(span, Span::new(Path::new("depgate.toml"), 4, 13));
+}

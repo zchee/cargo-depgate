@@ -27,12 +27,8 @@ fn common_args(args: &Args) -> &CommonArgs {
 }
 
 fn render_human_report(outcome: &pipeline::Outcome) -> String {
-    let context = RenderContext {
-        workspace_root: outcome.workspace_root.clone(),
-        tool: "cargo-depgate",
-        version: "test",
-        color: false,
-    };
+    let context =
+        RenderContext::new(outcome.workspace_root.clone(), "cargo-depgate", "test", false);
     let mut out = Vec::new();
     report::render(report::Format::Human, outcome, &context, &mut out)
         .expect("the in-memory report should render");
@@ -243,6 +239,7 @@ fn human_report_prints_manifest_entries_relative_to_the_workspace_root() {
         dependency: dependency.to_owned(),
         version: "0.1.0".to_owned(),
         span: Span { file: workspace_root.join("crates/app/Cargo.toml"), line, col },
+        span_bytes: 7,
     };
     let outcome = pipeline::Outcome {
         statuses: vec![
@@ -273,6 +270,7 @@ fn human_report_prints_manifest_entries_relative_to_the_workspace_root() {
             ],
             manifests_scanned: 1,
             bytes_scanned: 400,
+            root_workspace_dependencies: None,
         }),
         warnings: Vec::new(),
         workspace_root,
