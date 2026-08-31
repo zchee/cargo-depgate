@@ -1,0 +1,66 @@
+# Codecov configuration for cargo-depgate.
+# Reference: https://docs.codecov.com/docs/codecovyml-reference
+#
+# Coverage is uploaded by .github/workflows/codecov.yaml as a single lcov report
+# produced by `cargo llvm-cov nextest`.
+
+# https://docs.codecov.com/docs/codecovyml-reference#codecov
+codecov:
+  allow_coverage_offsets: true
+  require_ci_to_pass: false
+
+# https://docs.codecov.com/docs/codecovyml-reference#parsers
+parsers:
+  # llvm-cov emits `BRDA` records whose partially taken branches would otherwise be
+  # counted as misses on lines that did execute. Counting them as hits keeps the line
+  # number describing what the suite ran, which is the same choice `parsers.go` makes
+  # for Go's partial statements.
+  lcov:
+    partials_as_hits: true
+
+# https://docs.codecov.com/docs/codecovyml-reference#coverage
+coverage:
+  precision: 1
+  range: "60...90"
+  round: down
+  # https://docs.codecov.com/docs/commit-status
+  status:
+    default_rules:
+      flag_coverage_not_uploaded_behavior: include
+    project:
+      default:
+        target: auto
+        threshold: 1.0
+        if_not_found: success
+    patch:
+      default:
+        target: 50%
+        only_pulls: true
+        if_not_found: failure
+    changes: false
+
+# https://docs.codecov.com/docs/ignoring-paths
+#
+# None of these appear in the lcov report today -- `cargo llvm-cov nextest` instruments
+# only the lib and bin targets, so the report contains exactly the 16 non-test files
+# under src/. The entries below keep that true rather than assuming it: they are the
+# paths that hold no shipped behaviour, so a future flag or llvm-cov version that
+# started emitting them must not move the project number.
+ignore:
+  - benches/** # Divan harness and its baseline script; measured by CodSpeed, not tested.
+  - build.rs # Runs at build time to record the target triple; no run-time behaviour.
+  - examples/** # guppy_diff.rs is a developer cross-check against guppy, not shipped code.
+  - tests/** # Integration harness and fixtures: the code doing the testing, not the code under test.
+
+# https://docs.codecov.com/docs/pull-request-comments
+comment:
+  layout: "header, diff, flags, files"
+  behavior: default
+  require_changes: false
+  show_carryforward_flags: true
+  hide_comment_details: false
+  show_critical_paths: true
+
+# https://docs.codecov.com/docs/codecovyml-reference#github_checks
+github_checks:
+  annotations: true

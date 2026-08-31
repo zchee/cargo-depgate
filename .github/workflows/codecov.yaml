@@ -1,0 +1,43 @@
+name: Codecov
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      # Same reason as in ci.yaml: any inherited RUSTFLAGS would be handed to the pinned
+      # stable toolchain, and cargo-llvm-cov additionally injects its own
+      # `-C instrument-coverage` through this variable. Leaving it empty keeps the
+      # instrumentation flags cargo-llvm-cov computes as the only ones in play.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          # cargo-llvm-cov shells out to llvm-profdata and llvm-cov from the toolchain's
+          # own LLVM. `llvm-tools-preview` is the name rustup still accepts as an alias for
+          # the renamed `llvm-tools` component, so it resolves on 1.98.0 and on newer
+          # rustup releases alike.
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      # Same test selection as the CI job, so the coverage number describes the suite that
+      # actually gates merges. The three live-network tests stay skipped: they are opt-in
+      # through environment variables that this job deliberately does not set.
+      - run: cargo llvm-cov nextest --all-features --locked --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v5
+        with:
+          # Required for uploads; create it from the repository page on app.codecov.io.
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # `disable_search` stops the action from walking the tree for other coverage
+          # files, so the single lcov report produced above is the only thing uploaded.
+          files: lcov.info
+          disable_search: true
+          fail_ci_if_error: true
