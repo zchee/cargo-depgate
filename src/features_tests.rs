@@ -10,7 +10,10 @@ use guppy::{
 };
 
 use super::*;
-use crate::metadata::{Meta, MetadataBuffer, parse};
+use crate::{
+    graph::Scratch,
+    metadata::{Meta, MetadataBuffer, parse},
+};
 
 /// One declared dependency of a synthetic package.
 #[derive(Clone)]
@@ -349,9 +352,11 @@ fn a_slash_entry_enables_an_optional_dependency_and_requests_the_feature_on_it()
     );
 }
 
-#[test]
-fn a_weak_slash_entry_waits_for_the_dependency_and_fires_in_either_order() {
-    let workspace = Workspace::new(vec![
+/// `app` reaches `opt` only through `turn-on`, and asks `opt` for `inner` only weakly, so a
+/// selection naming `weak` alone leaves a request parked against a dependency that never
+/// arrives.
+fn weak_slash_workspace() -> Workspace {
+    Workspace::new(vec![
         Pkg::new("app")
             .feature("weak", &["opt?/inner"])
             .feature("turn-on", &["dep:opt"])
@@ -360,7 +365,12 @@ fn a_weak_slash_entry_waits_for_the_dependency_and_fires_in_either_order() {
             .feature("inner", &["dep:inner-child"])
             .decl(Decl::new("inner-child").optional()),
         Pkg::new("inner-child"),
-    ]);
+    ])
+}
+
+#[test]
+fn a_weak_slash_entry_waits_for_the_dependency_and_fires_in_either_order() {
+    let workspace = weak_slash_workspace();
     let graph = workspace.graph();
     let app = member(&graph, "app");
 
@@ -826,6 +836,78 @@ fn the_guard_reads_each_committed_document_the_way_it_was_generated() {
     }
 }
 
+#[test]
+fn lemmy_servers_default_closure_covers_every_member_that_reaches_it() {
+    // `tests/fixtures/lemmy.depgate.toml` roots L202 and L203 -- two workspace-*wide*
+    // `cargo tree -i <name>` assertions -- at `lemmy_server` with `features = "default"`, and
+    // that rooting is faithful only while the closure the default selection activates from
+    // `lemmy_server` covers every name the workspace can reach. Nothing else here would notice
+    // if it stopped: the rule passes by finding neither denied name, which it would equally do
+    // on a closure that had quietly shrunk.
+    //
+    // Membership is checked by node rather than by name: `lemmy_utils` and `lemmy_api_common`
+    // each resolve at two versions in this document (the member and a crates.io copy), so a
+    // name-keyed check would accept the wrong one.
+    //
+    // One member is genuinely outside that closure, and the exception is asserted by equality
+    // so that it cannot grow silently: the member `lemmy_api_common v1.0.0-beta.1` has no
+    // inbound resolve edge at all. `lemmy_api_routes_v3` is the only package in the workspace
+    // that declares the name, and it declares the crates.io `0.19.16` copy under the rename
+    // `lemmy_api_019`, so nothing depends on the member. It costs L202/L203 nothing, which is
+    // the second assertion: every package name that member's own unified closure carries is
+    // already in `lemmy_server`'s, so no name escapes the two rules by hiding behind it.
+    let lemmy = FIXTURES
+        .iter()
+        .find(|fixture| fixture.name == "lemmy")
+        .expect("lemmy is one of the committed fixtures");
+    let json = fixture_json(lemmy);
+    let buffer = MetadataBuffer::from_bytes(json.into_bytes());
+    let meta = parse(&buffer).expect("the lemmy document parses");
+    let graph = Graph::build(&meta).expect("the lemmy graph builds");
+
+    let root = member(&graph, "lemmy_server");
+    let activation = activate(&graph, root, &Selection::Default).expect("the walk runs");
+    let unreached = graph
+        .members()
+        .iter()
+        .copied()
+        .filter(|&node| node != root)
+        .filter(|&node| !activation.nodes().contains(node as usize))
+        .collect::<Vec<_>>();
+    let named = unreached
+        .iter()
+        .map(|&node| format!("{} v{}", graph.name(node), graph.version(node)))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        graph.members().len(),
+        41,
+        "the fixture's member count moved; the policy comment counts 40 others"
+    );
+    assert_eq!(
+        named,
+        ["lemmy_api_common v1.0.0-beta.1"],
+        "the set of members outside lemmy_server's default closure moved, so rooting L202/L203 \
+         there no longer covers the workspace the way the policy comment says it does"
+    );
+
+    let orphan = unreached[0];
+    let mut scratch = Scratch::new(&graph);
+    let covered = graph.reach(root, &mut scratch).names().clone();
+    let orphaned = graph.reach(orphan, &mut scratch).names().clone();
+    let escaping = orphaned
+        .difference(&covered)
+        .filter_map(|name| u32::try_from(name).ok())
+        .map(|name| graph.name_str(name))
+        .collect::<Vec<_>>();
+
+    assert!(
+        escaping.is_empty(),
+        "names reachable only through the member no rule roots at are outside both L202 and \
+         L203: {escaping:?}"
+    );
+}
+
 /// The package names guppy's feature-rooted, default-features closure reaches from `id`
 /// through normal links, under one platform spec; the root's own name excluded.
 fn guppy_closure(
@@ -929,16 +1011,30 @@ fn a_declared_feature_shadows_the_implicit_feature_of_the_dependency_it_is_named
 fn one_walk_reused_across_selections_answers_as_a_fresh_walk_would() {
     // The walk keeps its decode caches between runs, so every other piece of state has to be
     // reset: a leaked feature, dependency or edge would narrow the next rule's closure wrongly.
-    let workspace = dep_syntax_workspace();
+    //
+    // The weak-slash workspace is what makes the leak observable, and the deferral queue is the
+    // one piece of run state that can outlive the run that filled it. `weak` parks `opt?/inner`
+    // against a dependency that selection never turns on, so the request is still parked when
+    // the run ends; the very next selection turns `opt` on *without* asking for `inner`, and a
+    // deferral carried over from the previous run would be flushed there and pull `inner-child`
+    // into a closure that must not contain it. The selections therefore alternate, so that every
+    // parking run is immediately followed by the run that would flush its leftovers.
+    let workspace = weak_slash_workspace();
     let graph = workspace.graph();
     let app = member(&graph, "app");
+    let weak = || Selection::List(vec!["weak".to_owned()]);
+    let turn_on = || Selection::List(vec!["turn-on".to_owned()]);
     let selections = [
-        Selection::None,
-        Selection::List(vec!["net".to_owned()]),
-        Selection::Default,
+        weak(),
+        turn_on(),
+        weak(),
         Selection::All,
+        weak(),
         Selection::None,
-        Selection::List(vec!["net".to_owned()]),
+        Selection::List(vec!["weak".to_owned(), "turn-on".to_owned()]),
+        turn_on(),
+        weak(),
+        Selection::Default,
     ];
 
     let mut walk = Walk::new(&graph);

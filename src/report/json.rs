@@ -21,6 +21,8 @@ struct Report<'a> {
     features: serde_json::Value,
     timings: TimingsJson,
     counters: CountersJson,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rules: Option<Vec<RuleJson<'a>>>,
     violations: Vec<ViolationJson<'a>>,
 }
 
@@ -85,6 +87,31 @@ impl From<Counters> for CountersJson {
             matches: counters.matches,
         }
     }
+}
+
+/// One record per configured rule, in the order the rules were evaluated — the surface
+/// `violations[]` cannot provide, because a rule that passes emits no violation at all.
+///
+/// The array is written only when the policy carries at least one feature-aware rule. That is
+/// the only case in which a rule's outcome is not already recoverable from `violations[]` and
+/// `counters`: a rule that passes *because its selection compiled the offending name out* is
+/// indistinguishable, in a report without this array, from one that passes because the name was
+/// never in the graph, and `activation_pruned` is the evidence that tells them apart. A policy
+/// with no feature-aware rule therefore produces the report it produced before this key existed,
+/// byte for byte.
+///
+/// `features` and `activation_pruned` are per-record and follow the same rule the violation
+/// records follow: both are absent for a rule evaluated on the workspace-unified closure, so a
+/// unified rule sitting beside a feature-aware one adds no empty keys.
+#[derive(Serialize)]
+struct RuleJson<'a> {
+    id: &'a str,
+    kind: &'static str,
+    passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation_pruned: Option<&'a [String]>,
 }
 
 #[derive(Serialize)]
@@ -233,6 +260,7 @@ pub fn render(
         features: features_json(outcome.features.as_ref()),
         timings: TimingsJson::from_outcome(outcome),
         counters: outcome.counters.into(),
+        rules: rules(outcome),
         violations: violations(outcome),
     };
     let build_millis = build_started.elapsed().as_secs_f64() * 1e3;
@@ -268,6 +296,30 @@ fn selection_json(selection: &Selection) -> serde_json::Value {
             features.iter().cloned().map(serde_json::Value::String).collect(),
         ),
     }
+}
+
+/// Every rule's record, or `None` when no rule narrowed its closure — see [`RuleJson`] for why
+/// the absent case is the one that has to stay absent.
+fn rules(outcome: &crate::pipeline::Outcome) -> Option<Vec<RuleJson<'_>>> {
+    if outcome.statuses.iter().all(|status| status.features.is_none()) {
+        return None;
+    }
+    Some(
+        outcome
+            .statuses
+            .iter()
+            .map(|status| RuleJson {
+                id: &status.id,
+                kind: status.kind,
+                passed: status.passed,
+                features: status.features.as_ref().map(selection_json),
+                activation_pruned: status
+                    .features
+                    .as_ref()
+                    .map(|_| status.activation_pruned.as_slice()),
+            })
+            .collect(),
+    )
 }
 
 fn violations(outcome: &crate::pipeline::Outcome) -> Vec<ViolationJson<'_>> {

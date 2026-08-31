@@ -164,8 +164,10 @@ Resolve with `--all-features` (or `[graph].features = "all"`) to satisfy it.
 The two divergences from `cargo tree` that remain are the ones the gap table already records: the
 closure keeps every platform's edges, and it is rooted at the package rather than at a build, so
 the root's own dev-dependencies — which a bare `cargo tree -p P` includes — stay out. A rule that
-narrows reports the selection it used and how many names it removed; the names themselves are in
-the JSON report, as `features` and `activation_pruned` on the rule's record.
+narrows reports the selection it used and how many names it removed on its human-report line,
+whether it passed or failed; the names themselves are in the JSON report, as `features` and
+`activation_pruned` on that rule's record in the `rules[]` array — which is written whenever the
+policy carries at least one feature-aware rule, and is absent from every report where none does.
 
 ### The graph the rules see
 
@@ -292,6 +294,15 @@ carries every matching name it reached, an `internal` or `direct` violation carr
 `members`, `normal_edges`, `names`, `superset_extra_edges`, `direct_optional_decls`,
 `unrebased_path_deps`, `rules`, `violations` and `matches`.
 
+A policy that carries at least one feature-aware rule adds one more top-level key between
+`counters` and `violations`: a `rules[]` array with one `{id, kind, passed}` record per rule, in
+evaluation order, each rule that narrowed also carrying `features` and `activation_pruned`. It
+exists because `violations[]` is otherwise the only per-rule surface, and a rule that *passes* by
+narrowing emits no violation — so without it the names its selection removed are reported nowhere.
+The array is written only for such a policy: a report from a policy whose rules all read the
+workspace-unified closure has no `rules[]` key at all and is byte-for-byte what it was before the
+key existed.
+
 `features` is the selection the graph was **actually** resolved with, not the file's
 `[graph].features`: `"all"` for `--all-features` (or `features = "all"`), the array of specs for
 `--features`, `"default"` otherwise. Under `--metadata-json` it is `null` — no Cargo ran, so the
@@ -336,7 +347,10 @@ split on the tab.
 shows one member on one host with that member's own features. The difference is measured, not
 assumed: `counters.superset_extra_edges` reports how many of the edges a run actually traversed are
 platform-conditional (every normal `dep_kinds` entry carries a non-null `target`) or leave a
-workspace member through a declaration marked `optional = true`.
+workspace member through a declaration marked `optional = true`. A feature-aware rule contributes
+to it too, because measuring what its selection pruned means walking the unified closure as well as
+the narrowed one — so a policy whose rules *all* narrow can still report extra edges, and lemmy's
+400 below is that case rather than a widening any of its three rules was answered on.
 
 | example | packages / members | `superset_extra_edges` |
 |---|---:|---:|
@@ -366,8 +380,9 @@ feat_os_unix` step — are expressed at all. Two divergences from `cargo tree` s
 are why the result is still a superset: every platform's edges are kept, and the closure is rooted
 at the package rather than at a build, so the root's own dev-dependencies, which a bare
 `cargo tree -p P` includes, stay out. What the narrowing removed is reported per rule rather than
-counted per run — the human report gives the number, the JSON record lists the names as
-`activation_pruned` — so a pass by narrowing never reads as a workspace-wide claim.
+counted per run — the human report gives the number on the rule's own line, and the JSON report's
+`rules[]` array lists the names as `activation_pruned` — so a pass by narrowing never reads as a
+workspace-wide claim.
 [`docs/examples.md`](docs/examples.md) works three real policies through end to end, including the
 coreutils case where the same rule fires on the unified closure and passes on the package-rooted
 one.

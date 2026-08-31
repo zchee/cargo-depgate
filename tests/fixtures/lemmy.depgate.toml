@@ -25,10 +25,18 @@ versions-in-root = false
 
 # L202 and L203. `cargo tree -i <name>` with no `-p` and no feature flags asks a
 # workspace-wide reachability question about the *default* build, and
-# `lemmy_server` is the binary that closes over every other member, so rooting
-# the rule there with `features = "default"` reproduces it. The narrowing does
-# not cost that coverage: all 40 other members are still in the closure the
-# default selection activates, checked by requiring each of them by name. On this
+# `lemmy_server` is the binary that closes over the workspace, so rooting the
+# rule there with `features = "default"` reproduces it. The narrowing does not
+# cost that coverage: 39 of the 40 other members are in the closure the default
+# selection activates, and the fortieth is out of it for a reason that costs the
+# rule nothing -- the `lemmy_api_common` member has no inbound edge anywhere in
+# this resolve, because the only package that declares that name,
+# `lemmy_api_routes_v3`, declares the crates.io 0.19.16 copy under the rename
+# `lemmy_api_019`, and every package name that member's own closure carries is
+# already in `lemmy_server`'s. Both halves are asserted by
+# `lemmy_servers_default_closure_covers_every_member_that_reaches_it` in
+# `src/features_tests.rs`, so a regenerated fixture that narrows this coverage
+# fails there instead of weakening these two lines in silence. On this
 # `--all-features` document the unified closure does contain `extism` -- the
 # same rule without the key fires with witness
 # `lemmy_server -> lemmy_api_utils -> extism (optional; ...)`, which is the

@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, fs};
 
 use crate::{
     config::{FeatureSelection, Span},
+    features::Selection,
     manifest::{ManifestReport, ManifestViolation},
     pipeline::Outcome,
     rules::{Match, SealedEntry},
@@ -352,4 +353,45 @@ fn require_violation_label_counts_only_the_missing_patterns() {
     let status = status("rules.app.require", Some("app"), "require", false, 1);
 
     assert_eq!(violation_label(&status, Some(&violation)), "1 missing");
+}
+
+#[test]
+fn a_failing_feature_aware_rule_names_the_closure_it_was_answered_on() {
+    // The mirror image of the passing line's note. A finding made against a narrowed closure
+    // is a claim about one build, not about the workspace, so the selection has to travel with
+    // the finding as well as with the pass -- otherwise the only rules that say which question
+    // they answered are the ones that found nothing. The span file does not exist here, so the
+    // fallback line carries the label verbatim and the note is readable in place.
+    let root = Path::new("/workspace");
+    let id = "rules.app.deny";
+    let mut violation = graph_violation(root, id, "deny");
+    violation.matches = vec![matched("reqwest-like", "1.0.0", Vec::new())];
+    violation.features = Some(Selection::List(vec!["net".to_owned()]));
+    violation.activation_pruned = vec!["tls-only".to_owned()];
+    let mut status = status(id, Some("app"), "deny", false, 1);
+    status.features = Some(Selection::List(vec!["net".to_owned()]));
+    status.activation_pruned.clone_from(&violation.activation_pruned);
+    let outcome = outcome(root, vec![status], vec![violation], None, 1);
+
+    let rendered = render_text(&outcome);
+
+    assert!(
+        rendered.contains(
+            "FAIL rules.app.deny: missing-depgate.toml:3:5 1 match(es) \
+             (features = [\"net\"], 1 pruned)"
+        ),
+        "a failing feature-aware rule carries the same closure note a passing one does: \
+         {rendered}"
+    );
+}
+
+#[test]
+fn a_unified_rule_adds_no_closure_note_to_its_label() {
+    // The other half of AC 1 in the human report: the note appears only where a rule narrowed.
+    let root = Path::new("/workspace");
+    let mut violation = graph_violation(root, "rules.app.deny", "deny");
+    violation.matches = vec![matched("ui", "0.1.0", Vec::new())];
+    let status = status("rules.app.deny", Some("app"), "deny", false, 1);
+
+    assert_eq!(violation_label(&status, Some(&violation)), "1 match(es)");
 }

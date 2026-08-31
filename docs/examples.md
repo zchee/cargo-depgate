@@ -63,8 +63,10 @@ checks nothing is a failure mode rather than a pass.
 
 The first rule is L202 and L203. `cargo tree -i <name>` with no `-p` and no feature flags asks a
 workspace-wide question about the default build, and `lemmy_server` is the binary that closes over
-every other member — all 40 of them are still in the closure the default selection activates — so
-one rule rooted there with `features = "default"` answers both. The key is
+the workspace — 39 of the 40 other members are in the closure the default selection activates, and
+the fortieth, `lemmy_api_common`, is depended on by nothing here at all, so it adds no package name
+that closure does not already carry — so one rule rooted there with `features = "default"` answers
+both. The key is
 not decoration here: this document is resolved with `--all-features`, so its unified closure *does*
 contain `extism`, and the same rule without the key fires with
 `lemmy_server → lemmy_api_utils → extism v1.20.0 (optional; present via workspace feature
@@ -82,8 +84,10 @@ on, so the ban above cannot be satisfied by deleting the dependency. `require` i
 `lemmy_api_utils`, the member that declares `extism`, compiles with all of its features enabled.
 
 Each of the three narrowings is derived from the one document already in memory, not from another
-resolve, and what each removed is reported per rule: the count above, and the names themselves in
-the JSON record's `activation_pruned`.
+resolve, and what each removed is reported per rule: the count above, and the names themselves
+under `--format json`, in the `rules[]` array a feature-aware policy brings into the report. All
+three rules pass here, so `violations[]` is empty and that array is the only place their evidence
+lives — one `{id, kind, passed, features, activation_pruned}` record each.
 
 ## ckb — a check that was switched off
 
@@ -163,8 +167,10 @@ there, because `uu_csplit` and `uu_numfmt` request `uucore/diagnostics` from the
 edge, correctly. The feature-aware rule starts from `coreutils`, follows normal edges only, and
 never reaches it — which is the build-level claim the CI step is making.
 
-`superset_extra_edges = 358` measures the widening that is still there for every rule that does not
-narrow, and the 43 names this rule pruned measure what narrowing removed for the one that does.
+`superset_extra_edges = 358` counts the platform-conditional and member-optional edges the run
+traversed, and it is non-zero even though this policy's one rule narrows: measuring what a
+selection pruned means walking the unified closure too, and that walk is where the 358 are counted.
+The 43 names are the other half of the same measurement — what the narrowing actually removed.
 
 ## Why the shell form is fragile
 

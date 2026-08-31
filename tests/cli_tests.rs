@@ -1367,6 +1367,64 @@ fn lemmy_human_report_lists_every_rule_and_the_closure_each_answered_on() {
 }
 
 #[test]
+fn lemmy_json_report_records_every_rule_and_the_names_its_selection_removed() {
+    let (_temp, output) = example_check(&LEMMY, &["--format", "json", "--offline"]);
+
+    assert_eq!(output.status.code(), Some(0), "lemmy json check should pass: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("lemmy report should be valid JSON");
+    assert_eq!(
+        report["violations"].as_array().map(Vec::len),
+        Some(0),
+        "all three rules pass, which is exactly why `violations[]` cannot carry their evidence"
+    );
+
+    let rules = report["rules"].as_array().expect("a feature-aware policy writes rules[]");
+    assert_eq!(rules.len(), 3, "one record per configured rule, in evaluation order: {report}");
+    for rule in rules {
+        assert_eq!(rule["passed"], serde_json::Value::Bool(true));
+    }
+
+    // The counts are the ones the human report prints and `docs/examples.md` quotes; the names
+    // are what the human line cannot carry and what this array exists to publish. Each named
+    // check is the upstream assertion the rule translates: `extism` is in `lemmy_server`'s
+    // unified closure and the default selection is what removes it (L202/L203), and `diesel`
+    // is in `lemmy_api_common`'s and `--no-default-features` is what removes it (L201).
+    let pruned = |rule: &serde_json::Value| -> Vec<String> {
+        rule["activation_pruned"]
+            .as_array()
+            .expect("a feature-aware record lists the names it pruned")
+            .iter()
+            .map(|name| name.as_str().expect("a pruned name is a string").to_owned())
+            .collect()
+    };
+
+    assert_eq!(rules[0]["id"], "rules.lemmy_server.deny");
+    assert_eq!(rules[0]["kind"], "deny");
+    assert_eq!(rules[0]["features"], serde_json::json!("default"));
+    let server = pruned(&rules[0]);
+    assert_eq!(server.len(), 115);
+    assert!(server.contains(&"extism".to_owned()), "L203's name is what the selection removed");
+
+    assert_eq!(rules[1]["id"], "rules.lemmy_api_common.deny");
+    assert_eq!(rules[1]["kind"], "deny");
+    assert_eq!(rules[1]["features"], serde_json::json!("none"));
+    let api_common = pruned(&rules[1]);
+    assert_eq!(api_common.len(), 404);
+    assert!(api_common.contains(&"diesel".to_owned()), "L201's name is what the selection removed");
+
+    assert_eq!(rules[2]["id"], "rules.lemmy_api_utils.require");
+    assert_eq!(rules[2]["kind"], "require");
+    assert_eq!(rules[2]["features"], serde_json::json!("all"));
+    let api_utils = pruned(&rules[2]);
+    assert_eq!(api_utils.len(), 31);
+    assert!(
+        !api_utils.contains(&"extism".to_owned()),
+        "L204 is the positive assertion: `extism` has to survive this selection, not be pruned"
+    );
+}
+
+#[test]
 fn lemmy_explain_resolves_the_member_and_not_the_crates_io_copy() {
     let (_temp, output) = example_explain(&LEMMY, "lemmy_utils", "diesel");
 
@@ -1994,6 +2052,19 @@ fn a_feature_aware_deny_narrows_the_closure_end_to_end() {
     assert_eq!(violation["matches"][0]["name"], "reqwest-like");
     assert_eq!(violation["features"], serde_json::json!(["net"]));
     assert_eq!(violation["activation_pruned"], serde_json::json!([]));
+
+    let fired_human = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &selected,
+        &["--format", "human"],
+        false,
+    );
+    let rendered = cleaned_stdout(&fired_human);
+    assert!(
+        rendered.contains("1 match(es) (features = [\"net\"], 0 pruned)"),
+        "a rule that fails on a narrowed closure says which closure it was answered on, exactly \
+         as the passing form does: {rendered}"
+    );
 }
 
 #[test]
@@ -2008,4 +2079,13 @@ fn a_unified_rule_carries_no_feature_fields_in_its_json_record() {
         assert!(violation.get("features").is_none(), "unified rules add no features key");
         assert!(violation.get("activation_pruned").is_none(), "and no pruning key");
     }
+
+    // And the array those keys otherwise live in is not written at all: a policy with no
+    // feature-aware rule produces the report it produced before `rules[]` existed. The
+    // committed `ws_violations_json_report_snapshot` is the byte-level form of this claim;
+    // the assertion here names it so the reason the key is missing is not left to a diff.
+    assert!(
+        report.get("rules").is_none(),
+        "a unified-only policy writes no rules[] array: {report}"
+    );
 }

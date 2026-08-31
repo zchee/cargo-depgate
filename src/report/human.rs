@@ -57,7 +57,7 @@ pub fn render(
 }
 
 fn render_pass(status: &RuleStatus, color: bool, out: &mut dyn Write) -> io::Result<()> {
-    let closure = pass_closure(status);
+    let closure = closure_note(status);
     if color {
         let style = Style::new().fg_color(Some(AnsiColor::Green.into()));
         writeln!(out, "{}ok {}{closure}{}", style.render(), status.id, style.render_reset())
@@ -66,13 +66,17 @@ fn render_pass(status: &RuleStatus, color: bool, out: &mut dyn Write) -> io::Res
     }
 }
 
-/// The closure note a passing feature-aware rule carries, and nothing at all for a rule that
-/// read the workspace-unified closure.
+/// The closure note a feature-aware rule carries, and nothing at all for a rule that read the
+/// workspace-unified closure.
 ///
 /// A rule that passes because its selection compiled the offending name out looks exactly like
 /// one that passes because the name was never there, so the line says which closure answered
-/// and how much of the unified one it dropped. The names themselves are in the JSON report.
-fn pass_closure(status: &RuleStatus) -> String {
+/// and how much of the unified one it dropped. A rule that *fails* carries the same note, for
+/// the mirror-image reason: a finding reported against a narrowed closure is a claim about one
+/// build, not about the workspace, and the line has to say so. The pruned names themselves are
+/// listed in the JSON report, whose `rules[]` array is written whenever a policy carries a
+/// feature-aware rule.
+fn closure_note(status: &RuleStatus) -> String {
     status.features.as_ref().map_or_else(String::new, |features| {
         format!(" (features = {features}, {} pruned)", status.activation_pruned.len())
     })
@@ -231,9 +235,13 @@ fn render_violation_witnesses(
 }
 
 /// Builds the concise summary attached to a failed rule's source span.
+///
+/// A feature-aware rule appends the same closure note its passing form carries, so the
+/// selection a finding was made under is on the finding itself rather than only on the rules
+/// that found nothing.
 #[must_use]
 pub(crate) fn violation_label(status: &RuleStatus, violation: Option<&Violation>) -> String {
-    match (status.kind, violation) {
+    let mut label = match (status.kind, violation) {
         ("internal" | "leaf" | "direct", Some(violation)) => {
             format!("{} extra, {} missing", violation.extra.len(), violation.missing.len())
         }
@@ -242,7 +250,9 @@ pub(crate) fn violation_label(status: &RuleStatus, violation: Option<&Violation>
             format!("consumed by {} member(s)", violation.sealed_by.len())
         }
         _ => format!("{} match(es)", status.matched),
-    }
+    };
+    label.push_str(&closure_note(status));
+    label
 }
 
 /// Renders a versioned root-to-match witness with edge annotations.
