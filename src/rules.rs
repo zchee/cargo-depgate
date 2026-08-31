@@ -151,7 +151,10 @@ pub struct Evaluation {
     pub statuses: Vec<RuleStatus>,
     /// The failed rules, in their relative configuration order.
     pub violations: Vec<Violation>,
-    /// The total number of deny, extra, sealed, and unmatched `require` entries.
+    /// The total number of deny, extra and sealed entries.
+    ///
+    /// `require` contributes nothing: its finding counts the patterns that matched
+    /// *nothing*, which is not the same quantity every other contributor reports.
     pub matches: u32,
     /// The union of cfg-only and member-optional edges traversed by all BFS runs.
     pub superset_extra_edges: u32,
@@ -173,7 +176,8 @@ pub struct RuleStatus {
     pub kind: &'static str,
     /// Whether the rule passed.
     pub passed: bool,
-    /// The number of deny, extra, sealed, or unmatched `require` entries for this rule.
+    /// The number of deny, extra or sealed entries for this rule; always zero for a
+    /// `require` rule, whose count of unmatched patterns is `Violation::missing` instead.
     pub matched: u32,
 }
 
@@ -384,6 +388,11 @@ fn evaluate_deny(
 /// list exactly the patterns that matched nothing, in declaration order. An exact pattern
 /// resolves through the name table in `O(1)`; a glob scans the reached names and stops at
 /// its first match. Like `deny`, the root's own name is not a candidate.
+///
+/// The rule reports `matched: 0` however many patterns missed. Every other contributor to
+/// that counter reports names it *found*, and summing those with names *not* found would
+/// make the total mean nothing; the miss count reaches the reports through
+/// `Violation::missing`, which is what the human and GitHub labels already read.
 fn evaluate_require(
     rule: &Rule,
     graph: &Graph<'_>,
@@ -401,10 +410,9 @@ fn evaluate_require(
     if missing.is_empty() {
         return passed_result();
     }
-    let matched = count_u32(missing.len());
     let mut violation = empty_violation(rule);
     violation.missing = missing;
-    RuleResult { passed: false, matched, violation: Some(violation) }
+    RuleResult { passed: false, matched: 0, violation: Some(violation) }
 }
 
 fn is_required_name_reached(

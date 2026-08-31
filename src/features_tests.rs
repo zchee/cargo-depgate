@@ -435,6 +435,51 @@ fn an_optional_dependency_without_a_feature_key_carries_its_implicit_feature() {
 }
 
 #[test]
+fn a_dependency_named_default_is_the_packages_default_feature() {
+    // The name `default` gets no special case in `expand_feature`, because cargo gives it
+    // none: the implicit feature of an optional dependency named `default` *is* the
+    // package's default feature. Verified on cargo 1.98 — a plain `cargo tree` pulls the
+    // edge and the resolve node records `features: ["default"]`.
+    let workspace = Workspace::new(vec![
+        Pkg::new("app").decl(Decl::new("default").optional()).decl(Decl::new("always")),
+        Pkg::new("default"),
+        Pkg::new("always"),
+    ]);
+    let graph = workspace.graph();
+    let app = member(&graph, "app");
+
+    assert_eq!(
+        reached(&graph, app, &Selection::Default),
+        names(&["always", "default"]),
+        "the default selection activates the implicit feature, as cargo does"
+    );
+    assert_eq!(
+        reached(&graph, app, &Selection::None),
+        names(&["always"]),
+        "--no-default-features withholds it again"
+    );
+}
+
+#[test]
+fn a_package_with_no_default_feature_activates_nothing_for_the_default_selection() {
+    // The other half of the rule: with no `default` key and no dependency of that name,
+    // the seeded `default` finds nothing to expand and is a no-op, never an error.
+    let workspace = Workspace::new(vec![
+        Pkg::new("app").feature("extra", &["dep:opt"]).decl(Decl::new("opt").optional()),
+        Pkg::new("opt"),
+    ]);
+    let graph = workspace.graph();
+    let app = member(&graph, "app");
+
+    assert_eq!(reached(&graph, app, &Selection::Default), names(&[]));
+    assert_eq!(
+        reached(&graph, app, &Selection::List(vec!["extra".to_owned()])),
+        names(&["opt"]),
+        "the package's real features still work"
+    );
+}
+
+#[test]
 fn all_features_skips_an_implicit_feature_that_dep_syntax_suppressed() {
     // `dep:hidden` inside a feature value means cargo creates no `hidden` feature, so
     // `--all-features` reaches `hidden` only through `gate`, never as a feature of its own.

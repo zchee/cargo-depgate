@@ -26,7 +26,7 @@ expression: cleaned_stdout(&output)
     "unrebased_path_deps": 0,
     "rules": 2,
     "violations": 1,
-    "matches": 2
+    "matches": 0
   },
   "violations": [
     {

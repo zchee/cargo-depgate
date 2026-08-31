@@ -413,6 +413,27 @@ require = ["totally-unknown-name"]
 }
 
 #[test]
+fn empty_require_and_deny_lists_are_accepted_rules_not_errors() {
+    let raw = raw_config(
+        r"schema = 1
+
+[rules.app]
+require = []
+deny = []
+",
+    );
+
+    let validated = validate(&raw, None).expect("empty lists are a valid policy");
+
+    assert_eq!(
+        validated.config.rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+        ["rules.app.require", "rules.app.deny"],
+        "both keys still produce a rule, which then passes vacuously"
+    );
+    assert!(validated.warnings.is_empty());
+}
+
+#[test]
 fn require_and_deny_are_ordered_by_their_declaration_within_a_package() {
     let raw = raw_config(
         r#"schema = 1

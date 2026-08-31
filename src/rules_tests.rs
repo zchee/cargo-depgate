@@ -430,6 +430,23 @@ fn require_passes_when_every_exact_and_glob_pattern_matches_the_closure() {
 }
 
 #[test]
+fn an_empty_require_list_passes_vacuously_like_an_empty_deny_list() {
+    // Neither kind treats "no entries" as a configuration error, so both have to mean the
+    // same thing at evaluation time: nothing is asked, nothing can fail.
+    let graph = fixture_spec().graph();
+    let config =
+        config(vec![require("rules.a.require", "a", &[]), deny("rules.a.deny", "a", &[])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(evaluation.violations.is_empty(), "an empty list asks nothing of the closure");
+    assert!(evaluation.statuses.iter().all(|status| status.passed));
+    assert!(evaluation.statuses.iter().all(|status| status.matched == 0));
+    assert_eq!(evaluation.matches, 0);
+}
+
+#[test]
 fn require_reports_only_the_unmatched_patterns_in_declaration_order() {
     let graph = fixture_spec().graph();
     let config =
@@ -447,8 +464,14 @@ fn require_reports_only_the_unmatched_patterns_in_declaration_order() {
     );
     assert!(violation.matches.is_empty(), "a matched pattern carries no witness");
     assert!(violation.extra.is_empty() && violation.sealed_by.is_empty());
-    assert_eq!(evaluation.statuses[0].matched, 2);
-    assert_eq!(evaluation.matches, 2, "unmatched require entries feed the matches counter");
+    assert_eq!(
+        evaluation.statuses[0].matched, 0,
+        "a require miss is a count of names not found, so it is not a match"
+    );
+    assert_eq!(
+        evaluation.matches, 0,
+        "the counter sums names the rules found; the miss count lives in `missing`"
+    );
 }
 
 #[test]

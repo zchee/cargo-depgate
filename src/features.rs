@@ -184,6 +184,13 @@ pub fn activate(graph: &Graph<'_>, root: u32, selection: &Selection) -> Result<A
 /// activation walk a *subset* of the resolve rather than a different graph. Members are
 /// checked in `workspace_members` order, so the answer is stable for a given document.
 ///
+/// The check is complete only because cargo materialises each optional dependency's
+/// implicit feature into `packages[].features` (see [`crate::metadata::Pkg::features`]): a
+/// member resolved without one of its optional dependencies still declares that feature
+/// here, so comparing the table against `resolve.nodes[].features` catches it. Were the
+/// table the declared one alone, an unactivated implicit feature would leave no key to
+/// miss and the guard would pass on a document it must reject.
+///
 /// # Errors
 ///
 /// Returns [`Error::CargoMetadataUnparseable`] when a member's raw `features` slice, or its
@@ -305,9 +312,13 @@ impl<'g, 'm> Walk<'g, 'm> {
 
     /// The features the root starts with.
     ///
-    /// `All` has to reconstruct what cargo left out of the document: an optional dependency
-    /// carries an implicit feature of its own name unless some feature value references it
-    /// through `dep:` syntax, and cargo emits only the declared table.
+    /// `All` is the whole feature table, which on a cargo-generated document already holds
+    /// every optional dependency's implicit feature: cargo materialises it as
+    /// `"<extern name>": ["dep:<extern name>"]` (see [`crate::metadata::Pkg::features`]).
+    /// The `implicit` set below is a documented fallback for a synthetic or
+    /// pre-materialisation document, reconstructing the keys cargo would have emitted; its
+    /// own filter makes it empty against any document cargo produced, so nothing on that
+    /// path double-counts.
     fn seed(&mut self, root: u32, selection: &Selection) -> Result<Vec<String>, Error> {
         match selection {
             Selection::None => Ok(Vec::new()),
@@ -473,6 +484,15 @@ impl<'g, 'm> Walk<'g, 'm> {
     ///
     /// A name that is neither a feature nor a dependency is a no-op rather than an error:
     /// the document, not this walk, is the authority on which features exist.
+    ///
+    /// `default` is not special-cased, and must not be. A package with no `default` key but
+    /// an optional dependency of that name has `default` as its default feature, because the
+    /// implicit feature the dependency carries is named `default`: cargo 1.98 pulls that
+    /// edge under a plain `cargo tree` and records `features: ["default"]` on the resolve
+    /// node. So the fallback matches cargo here, and refusing it would *under*-activate —
+    /// the one direction that turns a `deny` rule into a false pass. Where the package has
+    /// neither the key nor such a dependency, the fallback finds no declaration and the
+    /// default selection activates nothing, which is the rest of cargo's rule.
     fn expand_feature(&mut self, node: u32, feature: &str) -> Result<(), Error> {
         self.decode(node)?;
         let Some(entries) = self.tables[node as usize].get(feature).map(|entries| {
@@ -547,8 +567,10 @@ fn edge_belongs(actual: Option<&str>, wanted: &str, claimed: &FxHashSet<String>)
 /// The extern names some feature value already references through `dep:` syntax.
 ///
 /// Cargo suppresses an optional dependency's implicit feature exactly when one of these
-/// mentions it, which is what makes `--all-features` reconstructable from the declared
-/// table alone.
+/// mentions it — the one case where the feature table carries no key for the dependency,
+/// and so the one case a reconstruction must not invent one. [`Walk::expand_feature`]
+/// reads the same set to keep a bare token naming a suppressed dependency from turning it
+/// on, since cargo holds that no such feature exists.
 fn suppressed_dependencies(table: &FeatureTable<'_>) -> FxHashSet<String> {
     let mut suppressed = FxHashSet::default();
     for entries in table.values() {

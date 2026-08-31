@@ -955,7 +955,11 @@ fn require_reports_only_the_patterns_that_matched_nothing() {
     assert_eq!(violation["missing"], serde_json::json!(["app", "no-such-*"]));
     assert_eq!(violation["matches"], serde_json::json!([]), "a matched pattern carries no witness");
     assert_eq!(violation["extra"], serde_json::json!([]));
-    assert_eq!(report["counters"]["matches"].as_u64(), Some(2));
+    assert_eq!(
+        report["counters"]["matches"].as_u64(),
+        Some(0),
+        "the counter sums names the rules found, and a require miss is a name not found"
+    );
 }
 
 #[test]
