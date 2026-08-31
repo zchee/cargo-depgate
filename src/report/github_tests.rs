@@ -6,6 +6,7 @@ use crate::{
     config::{FeatureSelection, Span},
     manifest::{self, ManifestReport, ManifestViolation},
     pipeline::Outcome,
+    platform::PlatformSelection,
     report::RenderContext,
     rules::{Match, RuleStatus, SealedEntry, Violation, WitnessHop},
     timings::{Counters, Timings},
@@ -100,6 +101,7 @@ fn outcome(graph_count: usize, manifest_entries: Vec<ManifestViolation>) -> Outc
         timings: Timings::default(),
         member_versions: BTreeMap::from([("app".to_owned(), "1.0.0".to_owned())]),
         features: Some(FeatureSelection::Default),
+        platform: PlatformSelection::all(),
         exit: 1,
     }
 }

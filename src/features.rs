@@ -56,8 +56,13 @@
 //!
 //! # Deliberate approximations
 //!
-//! * **All platforms are kept.** The CSR carries `cfg`-conditional edges on every host, and
-//!   so does this walk. The result stays a superset of `cargo tree` in that one dimension.
+//! * **All platforms are kept**, unless the run selected some. The CSR carries
+//!   `cfg`-conditional edges on every host by default, and so does this walk, which leaves the
+//!   result a superset of `cargo tree` in that one dimension. A
+//!   [`crate::platform::PlatformSelection`] closes the gap by removing those edges from the
+//!   CSR itself, so this walk narrows with it and needs to know nothing about it: it iterates
+//!   the edges the graph has, and a declaration whose edge the selection dropped simply
+//!   matches none.
 //! * **Normal edges only**, matching `-e normal`. Build-dependency and proc-macro feature
 //!   unification, which resolver v2 and v3 separate from the normal graph, is not modelled.
 //! * **Every normal declaration of an enabled name contributes its requested features**,

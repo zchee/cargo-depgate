@@ -1,0 +1,7 @@
+schema = 1
+
+[graph]
+platform = "hosts"
+
+[rules.app]
+deny = ["dep"]

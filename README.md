@@ -48,8 +48,9 @@ versions, rather than silently answering for one of them.
 Both invocation forms work: `cargo depgate …`, where Cargo passes `depgate` as `argv[1]` and the
 binary strips it, and `cargo-depgate …` run directly. `check` and `explain` share the same global
 flags: `-m/--manifest-path`, `--config`, `--metadata-json`, `--workspace-root`, `-F/--features`,
-`--all-features`, `--no-default-features`, `--offline`, `--locked`/`--no-locked`, `--cargo-timeout`,
-`--format` and `--timings`. `--workspace-root` is the one exception to "shared": it is valid only
+`--all-features`, `--no-default-features`, `--platform`, `--offline`, `--locked`/`--no-locked`,
+`--cargo-timeout`, `--format` and `--timings`. `--platform` is repeatable and takes `all`, `host`,
+or a target triple. `--workspace-root` is the one exception to "shared": it is valid only
 together with `--metadata-json`, and on its own it is a usage error. `--locked` is the default,
 because a gate must never rewrite
 `Cargo.lock`; `--no-locked` turns it off deliberately. `--format` defaults to `github` when
@@ -85,6 +86,9 @@ schema = 1
 # "default" | "all" | ["pkg/feature", ...]. Reaches `cargo metadata` only through --config;
 # --features / --all-features on the command line override it.
 features = "default"
+# "all" | "host" | ["x86_64-pc-windows-msvc", ...]. Which platforms' conditional dependency
+# edges the rules see. --platform on the command line overrides it.
+platform = "all"
 
 [internal]
 # Which package names count as "internal" for the `internal` and `leaf` rules.
@@ -118,6 +122,7 @@ sealed = true
 |---|---|---|---|
 | `schema` | integer | required | Policy schema version. v1 accepts only `1`; any other value is exit 2. |
 | `[graph].features` | `"default"`, `"all"`, or a list of Cargo feature specs such as `["app/net"]` | `"default"` | Feature selection for the `cargo metadata` run. See *Feature selection* below: it takes effect only through `--config`. |
+| `[graph].platform` | `"all"`, `"host"`, or a list of target triples such as `["x86_64-pc-windows-msvc"]` | `"all"` | Which platforms a conditional dependency edge has to be compiled on to enter the graph. See *Platform selection* below. Unlike `features`, this works in a discovered `depgate.toml` too. |
 | `[internal].members` | boolean | `true` | Treat every workspace member as an internal package. |
 | `[internal].patterns` | list of name globs | `[]` | Extra names counted as internal, e.g. `["acme-*"]`. Together with `members` this is the single definition of "internal", and it is used for membership matching only: the `internal` and `leaf` rules ask of each reached name whether it is in that set. Nothing else reads it — witness paths render identically whether or not a hop is internal. |
 | `[manifest].versions-in-root` | boolean | `true` | Enable the manifest rule described below. |
@@ -162,8 +167,9 @@ the first member that proves it, because a `deny` rule passing for want of an ed
 Resolve with `--all-features` (or `[graph].features = "all"`) to satisfy it.
 
 The two divergences from `cargo tree` that remain are the ones the gap table already records: the
-closure keeps every platform's edges, and it is rooted at the package rather than at a build, so
-the root's own dev-dependencies — which a bare `cargo tree -p P` includes — stay out. A rule that
+closure keeps every platform's edges unless the run selected some — the two narrowings compose, so
+`--platform host` closes this one — and it is rooted at the package rather than at a build, so the
+root's own dev-dependencies, which a bare `cargo tree -p P` includes, stay out. A rule that
 narrows reports the selection it used and how many names it removed on its human-report line,
 whether it passed or failed; the names themselves are in the JSON report, as `features` and
 `activation_pruned` on that rule's record in the `rules[]` array — which is written whenever the
@@ -177,15 +183,17 @@ resolve for the whole workspace:
 * An edge is normal when any of its `dep_kinds` entries has `kind = null`. Dev-dependency and
   build-dependency edges are excluded; proc-macro crates are reached through normal edges and stay
   in.
-* Every platform is traversed. A `cfg(windows)` or `cfg(target_arch = "wasm32")` edge is followed
-  on every host, and the witness marks it, for example `app v0.1.0 → winonly v0.1.0 [cfg(windows)]`.
+* Every platform is traversed **by default**. A `cfg(windows)` or `cfg(target_arch = "wasm32")`
+  edge is followed on every host, and the witness marks it, for example
+  `app v0.1.0 → winonly v0.1.0 [cfg(windows)]`. `--platform` and `[graph].platform` narrow this to
+  the platforms you actually ship — see *Platform selection* below.
 * Features are Cargo's, unified across the whole workspace. An optional dependency that another
   member enables is in the graph, and the witness annotates that hop with
   `(optional; present via workspace feature unification)`.
 * Renamed dependencies match by resolved package name, never by the local alias.
 
-This is a **superset** of what `cargo tree -p <member> -e normal` shows on one host, which is what
-the gap table below measures. The direction matters per rule kind: `deny`, `leaf` and `sealed` ask
+By default this is a **superset** of what `cargo tree -p <member> -e normal` shows on one host,
+which is what the gap table below measures. The direction matters per rule kind: `deny`, `leaf` and `sealed` ask
 a containment question, so a wider graph can only add findings and never hide one. `internal` and
 `direct` ask an equality question, so a wider graph can report a `+extra` name that a host-rooted,
 package-rooted view would not have shown. `require` asks a presence question, which points the
@@ -243,6 +251,59 @@ At a virtual workspace root, Cargo rejects bare feature names, so write `--featu
 Feature arguments are forwarded to Cargo verbatim; any Cargo error is exit 3 with Cargo's own
 stderr.
 
+### Platform selection
+
+By default the graph carries every platform's conditional edges, which is the safe default for a
+gate but not what `cargo tree` shows. `--platform` — or `[graph].platform` — narrows it to the
+platforms you actually ship, which is `cargo tree` parity in that one dimension:
+
+```sh
+cargo depgate check --platform host                      # what this machine compiles
+cargo depgate check --platform x86_64-unknown-linux-gnu   # what the release target compiles
+cargo depgate check --platform host --platform x86_64-pc-windows-msvc  # the union of both
+```
+
+* Values are `all`, `host`, or any target triple `rustc --print target-list` knows. The flag is
+  repeatable and the result is a **union**: an edge stays if *any* selected platform compiles it,
+  so adding a platform can only widen the graph. `all` anywhere means every platform.
+* `host` is resolved through `rustc -vV`, so the report names the triple rather than the word, and
+  a report stays readable off the machine that produced it.
+* The narrowing happens on the document `cargo metadata` already produced, so it is one Cargo run
+  whatever you select, no `--filter-platform`, and no target has to be installed. That is also why
+  it works in a **discovered** `depgate.toml`, where a non-default `[graph].features` cannot.
+* `--platform` on the command line overrides `[graph].platform` entirely, exactly as `--features`
+  overrides `[graph].features`.
+* Conditions are evaluated against the target table rustc ships, and only what is *provably*
+  false drops an edge. The `target_*` keys and the bare `unix` / `windows` families are answered
+  from that table. `test`, `proc_macro` and `feature = "..."` are false, because Cargo never sets
+  them while it evaluates a dependency table's `cfg`. **Everything else is unknown and keeps its
+  edge**: `debug_assertions`, a bare flag such as `cfg(tracing_unstable)` or
+  `cfg(overflow_checks)`, a key the target table does not answer such as
+  `cfg(relocation_model = "pic")`, `cfg(target_feature = "...")`, and any expression that will not
+  parse — which includes a bare `cfg(target_thread_local)`. Cargo settles those by matching
+  against `rustc --print cfg`, whose keys grow from release to release (a current nightly prints
+  `overflow_checks`, `relocation_model="pic"` and `target_thread_local` where 1.98 prints none of
+  them) and which also carries whatever `--cfg` your `RUSTFLAGS` add. None of that is visible in
+  a metadata document, so none of it is answered `false`. Keeping an edge can only widen the
+  closure, and a wider closure cannot hide a `deny` finding.
+* The price of that rule is a deliberate over-report against `cargo tree`. `--platform host`
+  keeps `tracing-core`'s `valuable` and `curve25519-dalek`'s `fiat-crypto`, which a default build
+  does not compile, because each sits behind a `cfg` that only a `RUSTFLAGS` `--cfg` sets. Both
+  are pinned as named exceptions in the guppy differential, so the gap cannot grow unnoticed.
+* A platform selection and a `[rules.<package>].features` selection narrow independently and
+  compose: the platform filter decides which edges exist, the feature walk decides which of those
+  a build turns on.
+* An unknown triple is exit 2 — from the command line as a usage error, from a `depgate.toml` with
+  the offending line annotated. An empty `platform = []` is exit 2 too: write `all` to keep every
+  platform rather than a selection nothing satisfies.
+
+One thing narrowing does **not** change is what a surviving conditional edge is called.
+`counters.superset_extra_edges` still counts every traversed edge whose every normal `dep_kinds`
+entry carries a `target`, and a witness still renders it as `[cfg(...)]`, because the edge really
+is platform-conditional however it got into the graph. Under a single selected platform the
+counter therefore over-reports the remaining gap to `cargo tree`, which is the harmless direction
+for a counter whose job is to say "this run may have seen more than a build would".
+
 ### What a report looks like
 
 Every configured rule is listed with its status, so a rule that matched nothing is still visible,
@@ -294,6 +355,10 @@ carries every matching name it reached, an `internal` or `direct` violation carr
 `members`, `normal_edges`, `names`, `superset_extra_edges`, `direct_optional_decls`,
 `unrebased_path_deps`, `rules`, `violations` and `matches`.
 
+A run that narrowed the graph to specific platforms adds a top-level `platform` key, an array of
+the resolved triples, between `features` and `timings`. A run on every platform — the default —
+omits it, so its report is byte-for-byte the one it produced before the key existed.
+
 A policy that carries at least one feature-aware rule adds one more top-level key between
 `counters` and `violations`: a `rules[]` array with one `{id, kind, passed}` record per rule, in
 evaluation order, each rule that narrowed also carrying `features` and `activation_pruned`. It
@@ -343,8 +408,10 @@ split on the tab.
 
 ## Cargo feature gap table
 
-`cargo-depgate` walks the workspace-unified, all-platform resolve, while `cargo tree -p M -e normal`
-shows one member on one host with that member's own features. The difference is measured, not
+`cargo-depgate` walks the workspace-unified, all-platform resolve by default, while
+`cargo tree -p M -e normal` shows one member on one host with that member's own features. The
+numbers below are that default; `--platform host` closes the platform half of the gap, and is
+verified against guppy's own host-enabled closure on the lemmy document. The difference is measured, not
 assumed: `counters.superset_extra_edges` reports how many of the edges a run actually traversed are
 platform-conditional (every normal `dep_kinds` entry carries a non-null `target`) or leave a
 workspace member through a declaration marked `optional = true`. A feature-aware rule contributes
@@ -402,6 +469,12 @@ Exit codes are 0 for success, 1 for policy violations, 2 for configuration or us
 | `4` | The report, `explain` output, or schema could not be written. A broken pipe is excluded: piping into `head` keeps the policy exit code. |
 
 New codes will be added rather than renumbered, because pipelines gate on them.
+
+When a run is broken in more than one way, the configuration is diagnosed first: a discovered
+`depgate.toml` that cannot be loaded, or that names an unsupported schema or an unknown platform,
+is reported as exit 2 even when the metadata document would also have failed the fail-closed
+input check that gives exit 3. The file you can edit is the one named. A `cargo metadata` that
+never produces a document at all is still exit 3, since there is nothing to check without it.
 
 <!-- depgate:ci -->
 

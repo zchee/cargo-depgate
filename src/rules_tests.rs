@@ -9,6 +9,7 @@ use crate::{
     config::{FeatureSelection, InternalDef, RuleFeatures},
     graph::Graph,
     metadata::{Meta, MetadataBuffer, parse},
+    platform::PlatformSelection,
 };
 
 const NORMAL: &str = r#"[{"kind":null,"target":null}]"#;
@@ -240,6 +241,7 @@ fn config(rules: Vec<Rule>, patterns: &[&str]) -> Config {
     Config {
         schema: 1,
         features: FeatureSelection::Default,
+        platform: PlatformSelection::all(),
         internal: InternalDef { members: true, patterns: globs(patterns) },
         manifest_versions_in_root: true,
         rules,

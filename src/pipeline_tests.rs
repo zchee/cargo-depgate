@@ -75,6 +75,7 @@ fn args(root: &Path, config_path: Option<PathBuf>) -> CheckArgs {
             ..MetadataOptions::default()
         },
         config_path,
+        platform: None,
     }
 }
 
@@ -85,6 +86,7 @@ fn explain_args(root: &Path, config_path: PathBuf, package: &str, dependency: &s
             ..MetadataOptions::default()
         },
         config_path: Some(config_path),
+        platform: None,
         package: package.to_owned(),
         dependency: dependency.to_owned(),
     }
@@ -133,6 +135,7 @@ fn explicit_phase_a_error_does_not_spawn_cargo() {
     let check_args = CheckArgs {
         metadata: MetadataOptions { cargo: Some(cargo.clone()), ..MetadataOptions::default() },
         config_path: Some(config_path),
+        platform: None,
     };
     let (result, stderr) = run_check(&check_args);
 
@@ -186,6 +189,7 @@ fn phase_a_error_matches_explicit_and_discovered_config() {
     let explicit_args = CheckArgs {
         metadata: MetadataOptions { cargo: Some(cargo.clone()), ..MetadataOptions::default() },
         config_path: Some(config_path),
+        platform: None,
     };
     let (explicit_result, explicit_stderr) = run_check(&explicit_args);
     let explicit_error = explicit_result.expect_err("explicit phase-A configuration should fail");
@@ -212,6 +216,103 @@ fn missing_discovered_config_names_absolute_path() {
     assert_eq!(error.exit_code(), 2);
     assert!(error.to_string().contains(&expected_path.display().to_string()));
     assert!(stderr.is_empty());
+}
+
+/// The same document [`metadata_json`] produces, with the one field `Graph::build_for_platforms`
+/// fails closed on emptied: valid JSON, parses fine, rejected as invalid metadata (exit 3).
+fn metadata_json_without_members(root: &Path) -> String {
+    let mut document: serde_json::Value =
+        serde_json::from_str(&metadata_json(root)).expect("the fixture document is JSON");
+    document["workspace_members"] = serde_json::json!([]);
+    document.to_string()
+}
+
+/// [`args`] over a caller-supplied document, so a test can choose how the metadata is broken.
+fn args_with_document(root: &Path, document: &str) -> CheckArgs {
+    let path = root.join("metadata.json");
+    write(&path, document);
+    CheckArgs {
+        metadata: MetadataOptions {
+            source: Some(MetadataSource::File(path)),
+            ..MetadataOptions::default()
+        },
+        config_path: None,
+        platform: None,
+    }
+}
+
+#[test]
+fn a_discovered_future_schema_is_reported_before_its_platform_value() {
+    // `[graph].platform` is read out of a discovered file before that file is validated — the
+    // graph cannot be built without the selection, and validation needs the graph. A file
+    // written for a schema this build does not know must still fail on the schema, because
+    // every other key in it is written in a grammar this build is only guessing at. The two
+    // configuration paths therefore say the same thing about the same bytes.
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let text = "schema = 99\n\n[graph]\nplatform = \"hosts\"\n\n[rules.app]\ndeny = [\"dep\"]\n";
+    write(&temp.path().join("depgate.toml"), text);
+
+    let (result, stderr) = run_check(&args(temp.path(), None));
+
+    let error = result.expect_err("a future schema must fail the run");
+    assert_eq!(error.exit_code(), 2);
+    assert!(
+        error.to_string().contains("unsupported configuration schema 99"),
+        "the schema is the diagnosis, not the platform value: {error}"
+    );
+    assert!(
+        !error.to_string().contains("hosts"),
+        "the platform value must not be diagnosed under an unknown schema: {error}"
+    );
+    assert!(stderr.is_empty(), "phase-A failures should not emit warnings: {stderr:?}");
+
+    // The explicit path reaches the same file through `preload_config`; identical message.
+    let explicit = CheckArgs {
+        config_path: Some(temp.path().join("depgate.toml")),
+        ..args(temp.path(), None)
+    };
+    let explicit_error = run_check(&explicit).0.expect_err("--config must fail the same way");
+    assert_eq!(explicit_error.to_string(), error.to_string());
+}
+
+#[test]
+fn an_unloadable_discovered_config_is_reported_before_an_invalid_metadata_document() {
+    // Both are broken, so the run is doomed either way and only the message differs. Since the
+    // platform selection moved ahead of graph construction, the configuration is now loaded
+    // first and its exit 2 shadows the metadata's exit 3. That is the useful order — the file
+    // the reader can fix is the one named — but it is a contract, so it is pinned here rather
+    // than left to the order two unrelated statements happen to sit in.
+    let temp = tempdir().expect("temporary pipeline directory should be creatable");
+    let document = metadata_json_without_members(temp.path());
+    let config_path = temp.path().join("depgate.toml");
+    write(&config_path, "schema = 1\n[rules.app\n");
+
+    let (result, stderr) = run_check(&args_with_document(temp.path(), &document));
+
+    let error = result.expect_err("an unparseable configuration must fail the run");
+    assert_eq!(error.exit_code(), 2, "the configuration error shadows the metadata error");
+    match error {
+        Error::Configuration { ref message, ref span } => {
+            assert!(message.contains("unclosed table"), "the TOML syntax is diagnosed: {message}");
+            assert_eq!(
+                span.as_ref().expect("a parse error carries a span").file.as_path(),
+                config_path.as_path(),
+                "the diagnostic points at the file the reader can fix"
+            );
+        }
+        other => panic!("expected a configuration error, got {other:?}"),
+    }
+    assert!(stderr.is_empty(), "a load failure should not emit warnings: {stderr:?}");
+
+    // The document really is rejected: with a loadable configuration the same bytes are exit 3.
+    write(
+        &config_path,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.app]\ndirect = []\n",
+    );
+    let metadata_error = run_check(&args_with_document(temp.path(), &document))
+        .0
+        .expect_err("the document must fail the fail-closed input check");
+    assert_eq!(metadata_error.exit_code(), 3);
 }
 
 fn write_app_manifest(root: &Path, dependencies: &str) {
@@ -622,4 +723,35 @@ fn the_argument_constructors_default_to_a_discovered_configuration() {
 
     let explain = explain.with_config_path(PathBuf::from("/ws/depgate.toml"));
     assert_eq!(explain.config_path, Some(PathBuf::from("/ws/depgate.toml")));
+}
+
+/// `CheckArgs` is `#[non_exhaustive]`, so a caller outside this crate cannot set `platform` in a
+/// struct literal: without `with_platform` the whole platform selection would be unreachable
+/// downstream, and `--platform` would be a binary-only feature.
+#[test]
+fn check_args_selects_a_platform_only_through_its_builder() {
+    let options = MetadataOptions::default().with_offline(true);
+    let windows = PlatformSelection::resolve(&["x86_64-pc-windows-msvc".to_owned()])
+        .expect("a triple rustc's built-in table carries resolves");
+
+    let deferred = CheckArgs::new(options.clone());
+    assert_eq!(deferred.platform, None, "an unset selection defers to the configuration");
+
+    let narrowed = CheckArgs::new(options).with_platform(windows.clone());
+    assert_eq!(narrowed.platform, Some(windows));
+}
+
+/// The same reachability guarantee for `explain`, which has to answer over the edges `check`
+/// kept: a platform `check` can select but `explain` cannot would make the two disagree.
+#[test]
+fn explain_args_selects_a_platform_only_through_its_builder() {
+    let options = MetadataOptions::default().with_offline(true);
+    let windows = PlatformSelection::resolve(&["x86_64-pc-windows-msvc".to_owned()])
+        .expect("a triple rustc's built-in table carries resolves");
+
+    let deferred = ExplainArgs::new(options.clone(), "app", "dep");
+    assert_eq!(deferred.platform, None, "an unset selection defers to the configuration");
+
+    let narrowed = ExplainArgs::new(options, "app", "dep").with_platform(windows.clone());
+    assert_eq!(narrowed.platform, Some(windows));
 }

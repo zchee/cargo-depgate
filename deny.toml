@@ -2,6 +2,12 @@
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "Unlicense", "Zlib", "Unicode-3.0"]
+# `target-lexicon` is the target table `cfg-expr` reads to evaluate a dependency's
+# `cfg(...)`, and it is the only crate in the tree under the LLVM exception. The exception
+# only *removes* an Apache-2.0 obligation, so it is strictly more permissive than the
+# `Apache-2.0` already allowed above; it is scoped to the one crate rather than allowed
+# outright so that a second crate arriving under it is a decision rather than a silence.
+exceptions = [{ crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] }]
 
 [bans]
 multiple-versions = "warn"

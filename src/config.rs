@@ -17,6 +17,7 @@ use crate::{
     error::Error,
     features::{self, Selection},
     graph::Graph,
+    platform::{self, PlatformSelection},
 };
 
 const CURRENT_SCHEMA: u32 = 1;
@@ -207,6 +208,8 @@ pub struct Config {
     pub schema: u32,
     /// The requested Cargo feature selection.
     pub features: FeatureSelection,
+    /// The target platforms dependency edges are evaluated against.
+    pub platform: PlatformSelection,
     /// The internal-package definition.
     pub internal: InternalDef,
     /// Whether the root manifest version rule is enabled.
@@ -500,6 +503,18 @@ config_types! {
                 #[serde(default = "default_feature_value")]
                 type: FeatureValue
             }
+        },
+        platform {
+            raw {
+                /// Target-platform selection for dependency-edge evaluation.
+                #[serde(default = "default_spanned_platform_value")]
+                type: Spanned<PlatformValue>
+            }
+            schema {
+                /// Target-platform selection: `all`, `host`, or a list of target triples.
+                #[serde(default = "default_platform_value")]
+                type: PlatformValue
+            }
         }
     }
     raw_extra {}
@@ -675,7 +690,7 @@ config_types! {
 
 impl Default for ConfigGraphSchema {
     fn default() -> Self {
-        Self { features: default_feature_value() }
+        Self { features: default_feature_value(), platform: default_platform_value() }
     }
 }
 
@@ -687,7 +702,10 @@ impl Default for ConfigInternalSchema {
 
 impl Default for RawGraph {
     fn default() -> Self {
-        Self { features: default_spanned_feature_value() }
+        Self {
+            features: default_spanned_feature_value(),
+            platform: default_spanned_platform_value(),
+        }
     }
 }
 
@@ -716,6 +734,16 @@ pub enum FeatureValue {
     /// A named selection (`default` or `all`).
     Named(String),
     /// Explicit Cargo feature specifications.
+    List(Vec<String>),
+}
+
+/// The non-spanned platform input accepted by TOML and the schema generator.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum PlatformValue {
+    /// A named selection (`all` or `host`).
+    Named(String),
+    /// Explicit target triples.
     List(Vec<String>),
 }
 
@@ -777,17 +805,37 @@ pub fn validate(cfg: &RawConfig, graph: Option<&Graph<'_>>) -> Result<Validated,
     Ok(validated)
 }
 
-fn phase_a(cfg: &RawConfig) -> Result<Validated, ConfigError> {
+/// Rejects a configuration written for a schema this build does not implement.
+///
+/// This is Phase A's first check, exposed on its own because the pipeline has to read
+/// `[graph].platform` out of a *discovered* file before that file reaches validation: the graph
+/// cannot be built without the selection, and validation needs the graph. Without this gate the
+/// two configuration paths would disagree about what is wrong with the same file — `--config`
+/// would report the schema, a discovered file would report whatever the platform value happens
+/// to look like under a grammar it was never written for.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] anchored at the `schema` value when it is not the version this
+/// build implements.
+pub fn check_schema(cfg: &RawConfig) -> Result<(), ConfigError> {
     let schema = *cfg.schema.get_ref();
-    if schema != CURRENT_SCHEMA {
-        return Err(config_error(
-            cfg,
-            cfg.schema.span().start,
-            format!("unsupported configuration schema {schema}; expected {CURRENT_SCHEMA}"),
-        ));
+    if schema == CURRENT_SCHEMA {
+        return Ok(());
     }
+    Err(config_error(
+        cfg,
+        cfg.schema.span().start,
+        format!("unsupported configuration schema {schema}; expected {CURRENT_SCHEMA}"),
+    ))
+}
+
+fn phase_a(cfg: &RawConfig) -> Result<Validated, ConfigError> {
+    check_schema(cfg)?;
+    let schema = *cfg.schema.get_ref();
 
     let features = feature_selection(cfg, cfg.graph.features.get_ref(), cfg.graph.features.span())?;
+    let platform = platform_selection(cfg)?;
     let patterns =
         compile_patterns(cfg, cfg.internal.patterns.get_ref(), cfg.internal.patterns.span())?;
     let mut rules = Vec::new();
@@ -804,6 +852,7 @@ fn phase_a(cfg: &RawConfig) -> Result<Validated, ConfigError> {
         config: Config {
             schema,
             features,
+            platform,
             internal: InternalDef { members: *cfg.internal.members.get_ref(), patterns },
             manifest_versions_in_root: *cfg.manifest.versions_in_root.get_ref(),
             rules,
@@ -1070,6 +1119,45 @@ fn feature_selection(
     }
 }
 
+/// Resolves `[graph].platform` into the selection the graph is built against.
+///
+/// This is public because the pipeline needs the selection **before** the graph exists: the
+/// filter is applied while the CSR is laid out, and a discovered `depgate.toml` is only found
+/// once `cargo metadata` has reported the workspace root. Unlike `[graph].features`, that
+/// ordering costs nothing — a platform narrows an already-resolved document rather than
+/// shaping the `cargo metadata` invocation, so a discovered file can select one just as an
+/// explicit `--config` can. Phase A re-derives the same value, so a configuration that fails
+/// here fails validation too, with the identical message and span.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] anchored at the offending value — the scalar for `platform = "..."`,
+/// the individual array entry for a list — when it is neither `all`, `host`, nor a target
+/// triple rustc knows, or when the list is empty.
+pub fn platform_selection(cfg: &RawConfig) -> Result<PlatformSelection, ConfigError> {
+    let span = cfg.graph.platform.span();
+    match cfg.graph.platform.get_ref() {
+        PlatformValue::Named(name) => PlatformSelection::resolve(std::slice::from_ref(name))
+            .map_err(|error| config_error(cfg, span.start, graph_platform_message(&error))),
+        PlatformValue::List(triples) if triples.is_empty() => Err(config_error(
+            cfg,
+            span.start,
+            "graph.platform must name at least one target triple; use `all` to keep every \
+             platform",
+        )),
+        PlatformValue::List(triples) => PlatformSelection::resolve(triples).map_err(|error| {
+            let range = array_entry_range(cfg, span.clone(), error.index);
+            config_error(cfg, range.start, graph_platform_message(&error))
+        }),
+    }
+}
+
+/// The `graph.platform` wording of an unresolvable platform, so the key that carries the
+/// value is named whichever form it was written in.
+fn graph_platform_message(error: &platform::UnknownPlatform) -> String {
+    format!("graph.platform: {error}")
+}
+
 fn compile_patterns(
     cfg: &RawConfig,
     patterns: &[String],
@@ -1262,6 +1350,14 @@ fn default_spanned_strings() -> Spanned<Vec<String>> {
 
 fn default_spanned_feature_value() -> Spanned<FeatureValue> {
     Spanned::new(0..0, default_feature_value())
+}
+
+fn default_platform_value() -> PlatformValue {
+    PlatformValue::Named(platform::ALL.to_owned())
+}
+
+fn default_spanned_platform_value() -> Spanned<PlatformValue> {
+    Spanned::new(0..0, default_platform_value())
 }
 
 #[cfg(test)]
