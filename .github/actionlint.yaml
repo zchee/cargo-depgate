@@ -1,0 +1,7 @@
+# actionlint's built-in runner-label allowlist lags GitHub's preview
+# images; these labels are real (actions/runner-images README, preview
+# badge) but unknown to the binary until its list refreshes upstream.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - xcode-27

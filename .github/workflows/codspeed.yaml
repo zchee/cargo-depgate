@@ -7,11 +7,11 @@ on:
 
 jobs:
   benchmarks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
