@@ -2,6 +2,7 @@ schema = 1
 
 [graph]
 features = "all"
+platform = "all"
 
 [internal]
 members = false

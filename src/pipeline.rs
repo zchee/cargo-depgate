@@ -13,6 +13,7 @@ use crate::{
     graph::{Graph, Scratch},
     manifest::{self, ManifestInput, ManifestReport},
     metadata,
+    platform::PlatformSelection,
     rules::{self, Evaluation, RuleStatus},
     timings::{Counters, Phase, Timings},
 };
@@ -24,6 +25,9 @@ pub struct CheckArgs {
     pub metadata: metadata::MetadataOptions,
     /// An explicit `depgate.toml` path, or `None` to discover it after parsing metadata.
     pub config_path: Option<PathBuf>,
+    /// A command-line platform selection, which overrides `[graph].platform`; `None` defers
+    /// to the configuration, whose own default is every platform.
+    pub platform: Option<PlatformSelection>,
 }
 
 /// Inputs for `explain <package> <dependency>`.
@@ -33,6 +37,9 @@ pub struct ExplainArgs {
     pub metadata: metadata::MetadataOptions,
     /// An explicit `depgate.toml` path, or `None` to discover it after parsing metadata.
     pub config_path: Option<PathBuf>,
+    /// A command-line platform selection, which overrides `[graph].platform`; `None` defers
+    /// to the configuration, whose own default is every platform.
+    pub platform: Option<PlatformSelection>,
     /// The package whose dependency path should be explained.
     pub package: String,
     /// The dependency to locate beneath `package`.
@@ -89,6 +96,12 @@ pub struct Outcome {
     /// value would misreport exactly the "released with `--features cloud`, gated on default"
     /// drift the field exists to expose.
     pub features: Option<config::FeatureSelection>,
+    /// The platform selection the graph was built against.
+    ///
+    /// Unlike [`Outcome::features`] this is never unknowable: no cargo has to run for it, the
+    /// filter is applied to whatever document this process read, and `host` is already resolved
+    /// to a triple — so a report carrying it stays reproducible off the machine that produced it.
+    pub platform: PlatformSelection,
     /// The policy result exit code (`0` for a pass, `1` for violations).
     pub exit: u8,
 }
@@ -123,7 +136,6 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
 
     let buffer = timings.measure(Phase::Read, || metadata::acquire(&metadata_options))?;
     let meta = timings.measure(Phase::Parse, || metadata::parse(&buffer))?;
-    let graph = timings.measure(Phase::Graph, || Graph::build(&meta))?;
 
     let explicit = preloaded.is_some();
     let raw = if let Some(raw) = preloaded {
@@ -132,6 +144,8 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
         let path = config::discover(Path::new(meta.workspace_root.as_ref()));
         config::load(&path)?
     };
+    let platform = effective_platform(args.platform.as_ref(), &raw)?;
+    let graph = timings.measure(Phase::Graph, || Graph::build_for_platforms(&meta, &platform))?;
     let validated = config::validate(&raw, Some(&graph)).map_err(configuration_error)?;
     let feature_warning =
         feature_selection_after_metadata(explicit, &args.metadata, &validated.config.features)?;
@@ -181,6 +195,7 @@ pub fn check(args: &CheckArgs, stderr: &mut impl Write) -> Result<Outcome, Error
         timings,
         member_versions,
         features: effective_features(&metadata_options, &validated.config.features),
+        platform,
         exit,
     })
 }
@@ -206,7 +221,6 @@ pub fn explain(args: &ExplainArgs, stderr: &mut impl Write) -> Result<ExplainOut
 
     let buffer = metadata::acquire(&metadata_options)?;
     let meta = metadata::parse(&buffer)?;
-    let graph = Graph::build(&meta)?;
 
     let explicit = preloaded.is_some();
     let raw = if let Some(raw) = preloaded {
@@ -215,6 +229,8 @@ pub fn explain(args: &ExplainArgs, stderr: &mut impl Write) -> Result<ExplainOut
         let path = config::discover(Path::new(meta.workspace_root.as_ref()));
         config::load(&path)?
     };
+    let platform = effective_platform(args.platform.as_ref(), &raw)?;
+    let graph = Graph::build_for_platforms(&meta, &platform)?;
     // Validation is deliberately retained even though explain does not evaluate rules: it is the
     // same Phase-B gate as check and materialises the config's graph feature selection.
     let validated = config::validate(&raw, Some(&graph)).map_err(configuration_error)?;
@@ -389,6 +405,30 @@ pub(crate) fn effective_features(
         return Some(configured.clone());
     }
     Some(config::FeatureSelection::List(options.features.clone()))
+}
+
+/// The platform selection the graph is built against: the command line when it named one,
+/// otherwise `[graph].platform`.
+///
+/// The command line wins outright, mirroring how `--features` supersedes `[graph].features`.
+/// The configured value is still validated by Phase A even when it is overridden, because a
+/// `depgate.toml` naming a triple that does not exist is broken whatever this run asked for.
+///
+/// Unlike a feature selection, a discovered `depgate.toml` can carry this one: `[graph].features`
+/// has to reach the `cargo metadata` command line and therefore cannot come from a file found
+/// only after that command ran, while a platform filter narrows an already-resolved document.
+///
+/// # Errors
+///
+/// Propagates the configuration error (exit code 2) for an unresolvable configured platform.
+fn effective_platform(
+    cli: Option<&PlatformSelection>,
+    raw: &config::RawConfig,
+) -> Result<PlatformSelection, Error> {
+    match cli {
+        Some(selection) => Ok(selection.clone()),
+        None => config::platform_selection(raw).map_err(configuration_error),
+    }
 }
 
 /// Whether the CLI made a feature *selection* that supersedes `[graph].features`.

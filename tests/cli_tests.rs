@@ -185,7 +185,14 @@ fn config_error_check(fixture_name: &str) -> Output {
     let config = config_error_fixture_root().join(format!("{fixture_name}.toml"));
     let phase_a = matches!(
         fixture_name,
-        "bad-glob" | "leaf-and-internal" | "self-reference" | "unknown-key" | "zero-rules"
+        "bad-glob"
+            | "leaf-and-internal"
+            | "platform-empty"
+            | "platform-unknown-name"
+            | "platform-unknown-triple"
+            | "self-reference"
+            | "unknown-key"
+            | "zero-rules"
     );
     if phase_a {
         let mut command = depgate();
@@ -1767,6 +1774,153 @@ fn cfg_only_dependency_is_reported_with_target_annotation() {
     assert_eq!(violation["matches"][0]["witness"][0]["name"], "winonly");
     assert_eq!(violation["matches"][0]["witness"][0]["version"], "0.1.0");
     assert_eq!(violation["matches"][0]["witness"][0]["target"], "cfg(windows)");
+}
+
+/// The `platform` key of a JSON report, or `None` when the run did not narrow.
+fn reported_platform(output: &Output) -> Option<Vec<String>> {
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("the report should be JSON");
+    report.get("platform").map(|value| {
+        value
+            .as_array()
+            .expect("platform should be an array of triples")
+            .iter()
+            .map(|triple| triple.as_str().expect("a triple is a string").to_owned())
+            .collect()
+    })
+}
+
+fn ws_cfg_check(options: &[&str]) -> Output {
+    let fixture = repository_root().join("tests/fixtures/ws-cfg");
+    let mut arguments = vec!["--format", "json"];
+    arguments.extend_from_slice(options);
+    fixture_check_with_options(&fixture, &arguments, false)
+}
+
+#[test]
+fn a_default_report_carries_no_platform_key() {
+    // The default is every platform, and a report of an unnarrowed run has to stay byte-for-byte
+    // the one it produced before the key existed.
+    let output = ws_cfg_check(&[]);
+
+    assert_eq!(output.status.code(), Some(1), "cfg-only deny must violate: {output:?}");
+    assert_eq!(reported_platform(&output), None);
+}
+
+#[test]
+fn the_host_platform_excludes_a_cfg_windows_only_dependency() {
+    let output = ws_cfg_check(&["--platform", "host"]);
+
+    let reported = reported_platform(&output).expect("a narrowed run reports its platform");
+    assert_eq!(
+        reported,
+        vec![cargo_depgate::platform::host_triple().to_owned()],
+        "`host` must be reported as the triple it resolved to, not as the word `host`"
+    );
+
+    // The suite has to pass wherever it runs: on a unix host cargo never compiles `winonly`, so
+    // the deny rule has nothing to match; a Windows host is the one place it still does.
+    let host_is_windows = reported[0].contains("-windows-");
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(host_is_windows)),
+        "host is {}: {output:?}",
+        reported[0]
+    );
+}
+
+#[test]
+fn every_platform_and_an_explicit_windows_triple_both_keep_the_cfg_windows_dependency() {
+    for options in [
+        ["--platform", "all"].as_slice(),
+        ["--platform", "x86_64-pc-windows-msvc"].as_slice(),
+        // A union that contains Windows keeps it however many other platforms stand beside it.
+        ["--platform", "host", "--platform", "x86_64-pc-windows-msvc"].as_slice(),
+    ] {
+        let output = ws_cfg_check(options);
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{options:?} must keep the cfg(windows) edge: {output:?}"
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("the report should be JSON");
+        assert_eq!(report["violations"][0]["matches"][0]["name"], "winonly");
+    }
+
+    // `all` names every platform, so it reports no narrowing at all.
+    assert_eq!(reported_platform(&ws_cfg_check(&["--platform", "all"])), None);
+}
+
+#[test]
+fn a_configured_platform_narrows_the_graph_and_the_flag_overrides_it() {
+    let fixture = repository_root().join("tests/fixtures/ws-cfg");
+    let configured = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &fixture.join("depgate-host.toml"),
+        &["--format", "json"],
+        false,
+    );
+
+    assert_eq!(
+        reported_platform(&configured),
+        Some(vec![cargo_depgate::platform::host_triple().to_owned()]),
+        "[graph].platform = \"host\" must narrow the graph exactly as --platform host does"
+    );
+
+    // The command line wins, mirroring how --features supersedes [graph].features.
+    let overridden = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &fixture.join("depgate-host.toml"),
+        &["--format", "json", "--platform", "all"],
+        false,
+    );
+
+    assert_eq!(reported_platform(&overridden), None);
+    assert_eq!(
+        overridden.status.code(),
+        Some(1),
+        "--platform all restores the cfg(windows) edge the file dropped: {overridden:?}"
+    );
+}
+
+#[test]
+fn an_unknown_platform_triple_on_the_command_line_is_a_usage_error() {
+    let output = ws_cfg_check(&["--platform", "x86_64-pc-windows-mvsc"]);
+
+    assert_eq!(output.status.code(), Some(2), "an unknown triple must exit 2: {output:?}");
+    assert!(output.stdout.is_empty(), "usage errors belong on stderr: {output:?}");
+    assert_eq!(
+        cleaned_stderr(&output),
+        "usage error: --platform: unknown target platform `x86_64-pc-windows-mvsc`; expected \
+         `all`, `host`, or a target triple rustc knows (see `rustc --print target-list`)\n"
+    );
+}
+
+#[test]
+fn config_error_platform_unknown_triple_snapshot() {
+    let output = config_error_check("platform-unknown-triple");
+
+    assert_eq!(output.status.code(), Some(2), "unknown triple check failed: {output:?}");
+    assert!(output.stdout.is_empty(), "configuration errors belong on stderr: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
+}
+
+#[test]
+fn config_error_platform_empty_snapshot() {
+    let output = config_error_check("platform-empty");
+
+    assert_eq!(output.status.code(), Some(2), "empty platform check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stderr(&output));
+    });
 }
 
 #[test]

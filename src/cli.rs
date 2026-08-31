@@ -16,6 +16,7 @@ use crate::{
     error::Error,
     metadata::{DEFAULT_TIMEOUT_SECS, MetadataOptions},
     pipeline,
+    platform::PlatformSelection,
     report::{self, Format as ReportFormat, RenderContext},
 };
 
@@ -139,6 +140,10 @@ pub(crate) struct CommonArgs {
     )]
     cargo_timeout: u64,
 
+    /// Evaluate dependency edges for this target platform (repeatable).
+    #[arg(long, value_name = "all|host|TRIPLE")]
+    platform: Vec<String>,
+
     /// Select the diagnostic output format.
     #[arg(long, value_enum)]
     format: Option<ReportFormat>,
@@ -172,6 +177,23 @@ impl CommonArgs {
             source: self.metadata_json.clone(),
             workspace_root: self.workspace_root.clone(),
         }
+    }
+
+    /// The `--platform` selection, or `None` when the flag was not given and `[graph].platform`
+    /// therefore decides.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Usage`] (exit code 2) naming the first value that is neither `all`,
+    /// `host`, nor a target triple rustc knows. A configured value fails the same way with the
+    /// offending `depgate.toml` line annotated; the flag has no file to point at.
+    fn platform_selection(&self) -> Result<Option<PlatformSelection>, Error> {
+        if self.platform.is_empty() {
+            return Ok(None);
+        }
+        PlatformSelection::resolve(&self.platform)
+            .map(Some)
+            .map_err(|error| Error::Usage { message: format!("--platform: {error}") })
     }
 }
 
@@ -243,6 +265,7 @@ fn run_check(common: &CommonArgs) -> Result<(), Error> {
     let check_args = pipeline::CheckArgs {
         metadata: common.metadata_options(),
         config_path: common.config.clone(),
+        platform: common.platform_selection()?,
     };
     let mut outcome = pipeline::check(&check_args, &mut stderr)?;
 
@@ -279,6 +302,7 @@ fn run_explain(explain: &ExplainArgs) -> Result<(), Error> {
     let args = pipeline::ExplainArgs {
         metadata: explain.common.metadata_options(),
         config_path: explain.common.config.clone(),
+        platform: explain.common.platform_selection()?,
         package: explain.package.clone(),
         dependency: explain.dependency.clone(),
     };

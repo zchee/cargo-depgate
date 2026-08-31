@@ -1,9 +1,18 @@
 #![expect(clippy::expect_used, reason = "test bodies assert directly")]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
+
+use guppy::{
+    PackageId,
+    graph::{DependencyDirection, PackageGraph},
+    platform::{EnabledTernary, PlatformSpec},
+};
 
 use super::*;
-use crate::metadata::{MetadataBuffer, parse, tests::fixture_json};
+use crate::{
+    metadata::{MetadataBuffer, parse, tests::example_document, tests::fixture_json},
+    platform::host_triple,
+};
 
 /// Parses `json` into a leaked, `'static` [`Meta`] so graphs can borrow it freely.
 fn meta(json: &str) -> &'static Meta<'static> {
@@ -128,7 +137,21 @@ impl Spec {
     fn graph(&self) -> Graph<'static> {
         Graph::build(meta(&self.json())).expect("synthetic graph builds")
     }
+
+    fn graph_for(&self, platform: &PlatformSelection) -> Graph<'static> {
+        Graph::build_for_platforms(meta(&self.json()), platform)
+            .expect("synthetic graph builds for the selection")
+    }
 }
+
+/// A selection built from `all` / `host` / triple tokens, for the platform tests below.
+fn platform(tokens: &[&str]) -> PlatformSelection {
+    PlatformSelection::resolve(&tokens.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>())
+        .expect("the platform tokens resolve")
+}
+
+const LINUX: &str = "x86_64-unknown-linux-gnu";
+const WINDOWS: &str = "x86_64-pc-windows-msvc";
 
 /// A 12-node graph with two roots, a diamond, two versions of one name at different
 /// depths, a long detour that must never win over the short path, and a shared tail.
@@ -713,4 +736,227 @@ fn an_activated_reach_refuses_a_mask_sized_to_another_graph() {
     let short = FixedBitSet::with_capacity(graph.edge_count() as usize - 1);
 
     graph.reach_activated(0, &short, &mut scratch);
+}
+
+/// `app` (a member) reaching `winonly` through a `cfg(windows)`-only edge, beside an
+/// unconditional edge to `always` that no selection may touch.
+fn windows_only_spec() -> Spec {
+    Spec {
+        packages: vec![("app", "0.1.0"), ("winonly", "0.1.0"), ("always", "0.1.0")],
+        edges: vec![(0, 1, CFG_ONLY), (0, 2, NORMAL)],
+        members: vec![0],
+        decls: vec![Decl::required(0, "winonly").on("cfg(windows)"), Decl::required(0, "always")],
+    }
+}
+
+/// Every package name the unified forward closure of `root` reaches, the root excluded.
+fn reached_names(graph: &Graph<'_>, root: u32) -> BTreeSet<String> {
+    let mut scratch = Scratch::new(graph);
+    let reach = graph.reach(root, &mut scratch);
+    let root_name = graph.name(root);
+    reach
+        .names()
+        .ones()
+        .filter_map(|name| u32::try_from(name).ok())
+        .map(|name| graph.name_str(name))
+        .filter(|&name| name != root_name)
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_windows_only_edge_survives_exactly_where_windows_is_selected() {
+    let spec = windows_only_spec();
+
+    // The default is the workspace-unified resolve: the edge is in the document on every host,
+    // and a policy that did not ask for a platform must keep seeing it.
+    assert_eq!(spec.graph().edge_count(), 2);
+    assert_eq!(spec.graph_for(&platform(&["all"])).edge_count(), 2);
+    assert_eq!(spec.graph_for(&platform(&[WINDOWS])).edge_count(), 2);
+    assert_eq!(spec.graph_for(&platform(&[LINUX])).edge_count(), 1);
+
+    // The unconditional edge is never at risk, whatever is selected.
+    for selection in [platform(&["all"]), platform(&[WINDOWS]), platform(&[LINUX])] {
+        assert!(
+            reached_names(&spec.graph_for(&selection), 0).contains("always"),
+            "an unconditional edge must survive every selection"
+        );
+    }
+
+    assert_eq!(reached_names(&spec.graph_for(&platform(&[WINDOWS])), 0).len(), 2);
+    assert_eq!(
+        reached_names(&spec.graph_for(&platform(&[LINUX])), 0),
+        BTreeSet::from(["always".to_owned()]),
+        "no unix target compiles a cfg(windows) dependency"
+    );
+}
+
+#[test]
+fn the_host_selection_drops_a_windows_only_edge_on_a_unix_host() {
+    let spec = windows_only_spec();
+    let graph = spec.graph_for(&platform(&["host"]));
+
+    // The expectation is derived from the resolved host triple rather than assumed, so the
+    // assertion states the same thing on a unix machine and on a Windows one.
+    let host_is_windows = host_triple().contains("-windows-");
+    assert_eq!(
+        graph.edge_count(),
+        1 + u32::from(host_is_windows),
+        "host is {}, which must {} the cfg(windows) edge",
+        host_triple(),
+        if host_is_windows { "keep" } else { "drop" }
+    );
+    assert_eq!(
+        reached_names(&graph, 0).contains("winonly"),
+        host_is_windows,
+        "the reachable set has to agree with the edge count"
+    );
+}
+
+#[test]
+fn host_selects_the_same_graph_as_naming_the_host_triple() {
+    let spec = windows_only_spec();
+
+    assert_eq!(
+        spec.graph_for(&platform(&["host"])).edge_count(),
+        spec.graph_for(&platform(&[host_triple()])).edge_count(),
+        "`host` is a spelling of the resolved triple, not a separate rule"
+    );
+}
+
+#[test]
+fn a_dropped_edge_is_absent_from_every_view_of_the_graph() {
+    let spec = windows_only_spec();
+    let graph = spec.graph_for(&platform(&[LINUX]));
+
+    // The filter runs where the CSR is laid out, so the edge has no id at all rather than
+    // being a hidden entry a traversal has to remember to skip. Node 1 keeps its node id —
+    // the package is still in `packages[]` — but nothing leads to it.
+    assert_eq!(graph.node_count(), 3, "filtering edges must not renumber nodes");
+    assert_eq!(graph.edge_count(), 1);
+    assert_eq!(graph.edge_between(0, 1), None);
+    assert_eq!(graph.direct_nodes(0), [2]);
+    assert_eq!(graph.edges_from(0), 0..1);
+    assert_eq!(graph.counters().normal_edges, 1);
+}
+
+#[test]
+fn an_edge_survives_when_any_one_selected_platform_activates_it() {
+    // Two normal entries, each conditional on a different family: the edge belongs to the
+    // graph of either platform, and to the union of both.
+    let spec = Spec {
+        packages: vec![("app", "0.1.0"), ("dual", "0.1.0")],
+        edges: vec![(
+            0,
+            1,
+            r#"[{"kind":null,"target":"cfg(unix)"},{"kind":null,"target":"cfg(windows)"}]"#,
+        )],
+        members: vec![0],
+        decls: vec![Decl::required(0, "dual").on("cfg(unix)")],
+    };
+
+    assert_eq!(spec.graph_for(&platform(&[LINUX])).edge_count(), 1);
+    assert_eq!(spec.graph_for(&platform(&[WINDOWS])).edge_count(), 1);
+    assert_eq!(spec.graph_for(&platform(&[LINUX, WINDOWS])).edge_count(), 1);
+    assert_eq!(
+        spec.graph_for(&platform(&["wasm32-unknown-unknown"])).edge_count(),
+        0,
+        "a target in neither family activates neither entry"
+    );
+}
+
+#[test]
+fn a_surviving_conditional_edge_is_still_reported_as_platform_conditional() {
+    // `edge_is_cfg_only` answers "every normal entry of this edge carries a target", which is
+    // what a witness renders as `[cfg(...)]`. Narrowing the selection removes edges; it does
+    // not turn a conditional edge into an unconditional one, so the annotation survives.
+    let spec = windows_only_spec();
+    let graph = spec.graph_for(&platform(&[WINDOWS]));
+    let edge = graph.edge_between(0, 1).expect("windows keeps the cfg(windows) edge");
+
+    assert!(graph.edge_is_cfg_only(edge));
+    assert_eq!(
+        graph.edge_kinds(edge).expect("the entry decodes")[0].target.as_deref(),
+        Some("cfg(windows)")
+    );
+}
+
+/// The package names guppy reaches from `id` through normal links that are not disabled on
+/// `platform`, the root's own name excluded — the same query `examples/guppy_diff.rs` runs.
+fn guppy_package_closure(
+    package_graph: &PackageGraph,
+    id: &PackageId,
+    platform: &PlatformSpec,
+) -> BTreeSet<String> {
+    let root_name = package_graph.metadata(id).expect("the member is in guppy's graph").name();
+    package_graph
+        .query_forward([id])
+        .expect("the member resolves")
+        .resolve_with_fn(|_, link| {
+            let normal = link.normal();
+            normal.is_present() && normal.status().enabled_on(platform) != EnabledTernary::Disabled
+        })
+        .packages(DependencyDirection::Forward)
+        .map(|package| package.name())
+        .filter(|&name| name != root_name)
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn the_host_filtered_graph_matches_guppys_host_closure_on_every_lemmy_member() {
+    // guppy resolves cargo's platform rules for real, so it is the oracle for the filter, and
+    // the committed lemmy document is the only real-world input the suite has.
+    //
+    // The unfiltered graph is a strict *superset* of this closure — that gap is the
+    // platform-conditional widening the default keeps on purpose, and it is asserted below so
+    // that a filter which did nothing at all could not pass this test. Under `host` the two
+    // must agree exactly: an equality, not a subset check, so a filter that drifts in either
+    // direction fails here. Dropping an edge guppy keeps would be the dangerous direction —
+    // that is how a `deny` rule turns into a false pass.
+    let json = example_document("tests/fixtures/lemmy-439734d");
+    let package_graph = PackageGraph::from_json(&json).expect("guppy loads the document");
+    let host_spec = PlatformSpec::build_target().expect("the host platform is known");
+
+    let buffer: &'static MetadataBuffer =
+        Box::leak(Box::new(MetadataBuffer::from_bytes(json.into_bytes())));
+    let meta: &'static Meta<'static> = Box::leak(Box::new(parse(buffer).expect("lemmy parses")));
+    let unified = Graph::build(meta).expect("the unfiltered lemmy graph builds");
+    let host = Graph::build_for_platforms(meta, &platform(&["host"]))
+        .expect("the host-filtered lemmy graph builds");
+
+    assert!(
+        host.edge_count() < unified.edge_count(),
+        "the host filter must actually remove edges from the lemmy graph"
+    );
+
+    let mut narrowed_somewhere = false;
+    for (index, &member) in host.members().iter().enumerate() {
+        let name = host.name(member);
+        let id = PackageId::new(host.package(member).id.to_string());
+        let theirs = guppy_package_closure(&package_graph, &id, &host_spec);
+        let ours = reached_names(&host, member);
+
+        assert_eq!(
+            ours.difference(&theirs).collect::<Vec<_>>(),
+            Vec::<&String>::new(),
+            "{name}: reached on the host filter but not compiled on the host by cargo"
+        );
+        assert_eq!(
+            theirs.difference(&ours).collect::<Vec<_>>(),
+            Vec::<&String>::new(),
+            "{name}: compiled on the host by cargo but dropped by the host filter"
+        );
+
+        // Same member, same index, on the unfiltered graph: `members()` is `workspace_members`
+        // order in both, and the platform filter never touches nodes.
+        let unfiltered = reached_names(&unified, unified.members()[index]);
+        assert!(ours.is_subset(&unfiltered), "{name}: narrowing must never add a name");
+        narrowed_somewhere |= ours.len() < unfiltered.len();
+    }
+
+    assert!(
+        narrowed_somewhere,
+        "at least one lemmy member must reach fewer names once the host filter applies"
+    );
 }

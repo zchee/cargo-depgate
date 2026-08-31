@@ -325,6 +325,7 @@ fn real_check_args() -> CheckArgs {
             ..MetadataOptions::default()
         },
         config_path: Some(PathBuf::from(REAL_CONFIG_PATH)),
+        platform: None,
     }
 }
 
@@ -336,6 +337,7 @@ fn synthetic_check_args(temp: &tempfile::TempDir) -> CheckArgs {
             ..MetadataOptions::default()
         },
         config_path: Some(temp.path().join("depgate.toml")),
+        platform: None,
     }
 }
 

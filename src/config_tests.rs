@@ -322,6 +322,10 @@ fn absent_sections_use_semantic_defaults_for_both_config_types() {
         raw.graph.features.get_ref(),
         FeatureValue::Named(name) if name == "default"
     ));
+    assert!(matches!(
+        raw.graph.platform.get_ref(),
+        PlatformValue::Named(name) if name == "all"
+    ));
     assert!(*raw.internal.members.get_ref());
     assert!(raw.internal.patterns.get_ref().is_empty());
     assert!(*raw.manifest.versions_in_root.get_ref());
@@ -331,6 +335,10 @@ fn absent_sections_use_semantic_defaults_for_both_config_types() {
     assert!(matches!(
         schema.graph.features,
         FeatureValue::Named(name) if name == "default"
+    ));
+    assert!(matches!(
+        schema.graph.platform,
+        PlatformValue::Named(name) if name == "all"
     ));
     assert!(schema.internal.members);
     assert!(schema.internal.patterns.is_empty());
@@ -542,6 +550,79 @@ fn an_unknown_rule_features_value_is_rejected_at_the_key() {
     );
     // The value `"everything"` starts at line 4, column 12.
     assert_span(error.span.as_ref(), "bad-features.toml", 4, 12);
+}
+
+#[test]
+fn the_platform_selection_defaults_to_every_platform() {
+    let raw = raw_config("schema = 1\n\n[rules.app]\ndeny = [\"dep\"]\n");
+    let validated = validate(&raw, None).expect("a config without [graph].platform validates");
+
+    assert!(validated.config.platform.is_all(), "an unset platform must not narrow the graph");
+    assert!(
+        platform_selection(&raw).expect("the pre-graph accessor agrees").is_all(),
+        "the accessor the pipeline calls before the graph exists must agree with Phase A"
+    );
+}
+
+#[test]
+fn a_named_or_listed_platform_resolves_to_triples() {
+    let host =
+        raw_config("schema = 1\n\n[graph]\nplatform = \"host\"\n\n[rules.app]\nleaf = true\n");
+    assert_eq!(
+        platform_selection(&host).expect("host resolves").triples().collect::<Vec<_>>(),
+        vec![crate::platform::host_triple()]
+    );
+
+    let listed = raw_config(
+        "schema = 1\n\n[graph]\nplatform = [\"x86_64-pc-windows-msvc\"]\n\n[rules.app]\nleaf = true\n",
+    );
+    assert_eq!(
+        platform_selection(&listed).expect("a triple list resolves").triples().collect::<Vec<_>>(),
+        vec!["x86_64-pc-windows-msvc"]
+    );
+}
+
+#[test]
+fn an_unknown_platform_name_is_rejected_at_the_value() {
+    let raw = load_fixture("platform-unknown-name.toml");
+    let error = validate(&raw, None).expect_err("an unknown selection must be rejected");
+
+    assert!(
+        error.message.starts_with("graph.platform: unknown target platform `hosts`"),
+        "the message must name the key and the value: {}",
+        error.message
+    );
+    // The value `"hosts"` starts at line 4, column 12.
+    assert_span(error.span.as_ref(), "platform-unknown-name.toml", 4, 12);
+}
+
+#[test]
+fn an_unknown_platform_triple_is_rejected_at_its_own_array_entry() {
+    let raw = load_fixture("platform-unknown-triple.toml");
+    let error = validate(&raw, None).expect_err("a misspelt triple must be rejected");
+
+    assert!(
+        error.message.contains("`x86_64-pc-windows-mvsc`"),
+        "the message must quote the offending triple, not the whole list: {}",
+        error.message
+    );
+    // The second entry starts at line 4, column 41 — not the start of the array, so the
+    // annotated snippet underlines the triple the author has to fix.
+    assert_span(error.span.as_ref(), "platform-unknown-triple.toml", 4, 41);
+}
+
+#[test]
+fn an_empty_platform_list_is_rejected() {
+    // A selection nothing satisfies would drop every conditional edge without saying so, which
+    // is a silently different graph rather than a stricter policy.
+    let raw = load_fixture("platform-empty.toml");
+    let error = validate(&raw, None).expect_err("an empty platform list must be rejected");
+
+    assert_eq!(
+        error.message,
+        "graph.platform must name at least one target triple; use `all` to keep every platform"
+    );
+    assert_span(error.span.as_ref(), "platform-empty.toml", 4, 12);
 }
 
 #[test]

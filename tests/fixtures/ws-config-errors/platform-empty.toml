@@ -1,0 +1,7 @@
+schema = 1
+
+[graph]
+platform = []
+
+[rules.app]
+deny = ["dep"]

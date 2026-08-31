@@ -6,6 +6,7 @@ use crate::{
     config::{FeatureSelection, Span},
     manifest::{self, ManifestReport, ManifestViolation},
     pipeline::Outcome,
+    platform::PlatformSelection,
     report::RenderContext,
     rules::{Match, RuleStatus, SealedEntry, Violation, WitnessHop},
     timings::{Counters, Timings},
@@ -130,6 +131,7 @@ fn outcome(features: Option<FeatureSelection>) -> Outcome {
         timings: Timings::start(),
         member_versions: BTreeMap::from([("app".to_owned(), "0.1.0".to_owned())]),
         features,
+        platform: PlatformSelection::all(),
         exit: 1,
     }
 }

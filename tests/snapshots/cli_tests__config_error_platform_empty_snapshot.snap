@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: graph.platform must name at least one target triple; use `all` to keep every platform
+ --> <ROOT>/tests/fixtures/ws-config-errors/platform-empty.toml:4:12
+  |
+4 | platform = []
+  |            ^^ here

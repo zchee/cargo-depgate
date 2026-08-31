@@ -24,8 +24,10 @@
 //! - Every string is borrowed from the JSON buffer through [`Meta`]; the graph
 //!   itself owns only integer arrays and bitsets.
 //! - The raw `dep_kinds` slice of an edge stays undecoded. A folding `Visitor`
-//!   reduces it to two flags at build time without allocating; the `target`
-//!   strings are decoded only when a witness is rendered.
+//!   reduces it to a handful of counts at build time without allocating,
+//!   borrowing each entry's `target` straight out of the JSON buffer to ask
+//!   [`PlatformSelection`] whether the selection activates it; the entries are
+//!   materialised as owned [`KindEntry`] values only when a witness is rendered.
 //! - No hash lookups happen inside a traversal loop; the name projection is a
 //!   slice index.
 //!
@@ -54,6 +56,7 @@ use serde_json::value::RawValue;
 use crate::{
     error::Error,
     metadata::{Dep, Meta, Node, Pkg, Resolve, resolve_of},
+    platform::PlatformSelection,
     timings::Counters,
 };
 
@@ -137,6 +140,26 @@ impl<'m> Graph<'m> {
     /// has an empty or absent `dep_kinds`. Returns [`Error::CargoMetadataUnparseable`]
     /// when a raw `dep_kinds` or `dependencies` slice is malformed.
     pub fn build(meta: &'m Meta<'m>) -> Result<Self, Error> {
+        Self::build_for_platforms(meta, &PlatformSelection::all())
+    }
+
+    /// Interns `meta` into a CSR graph of the normal edges `platform` activates.
+    ///
+    /// The filter is applied where the CSR is laid out, so it is not a view over a wider
+    /// graph: an edge no selected platform activates has no edge id, is not counted by
+    /// [`Graph::edge_count`], is not reachable by any traversal, and is not in the edge set a
+    /// [`crate::features::Activation`] masks. A platform selection and a feature selection
+    /// therefore narrow the closure independently and compose without either having to know
+    /// about the other. [`PlatformSelection::all`] keeps every edge and is what
+    /// [`Graph::build`] passes.
+    ///
+    /// # Errors
+    ///
+    /// The same invariant violations [`Graph::build`] reports.
+    pub fn build_for_platforms(
+        meta: &'m Meta<'m>,
+        platform: &PlatformSelection,
+    ) -> Result<Self, Error> {
         let resolve = resolve_of(meta)?;
         let packages = &meta.packages;
         let package_count = packages.len();
@@ -166,7 +189,7 @@ impl<'m> Graph<'m> {
         let NameTables { names, name_ids, node_to_name } = intern_names(packages);
         let (members, is_member) = collect_members(meta, &id_to_pkg)?;
         let Csrs { forward, edge_kinds, edge_extern, edge_cfg_only } =
-            build_csr(resolve, &node_of_pkg, &id_to_pkg, total_deps)?;
+            build_csr(resolve, &node_of_pkg, &id_to_pkg, total_deps, platform)?;
         let edge_member_optional =
             mark_member_optional(packages, &members, &forward, &names, &node_to_name)?;
         let (name_offsets, nodes_by_name) = group_by_name(&node_to_name, names.len());
@@ -665,12 +688,14 @@ struct Csrs<'m> {
     edge_cfg_only: FixedBitSet,
 }
 
-/// Folds every edge's `dep_kinds` and lays the normal edges out as a CSR (§3.2 steps 5–6).
+/// Folds every edge's `dep_kinds` and lays the normal edges `platform` activates out as a
+/// CSR (§3.2 steps 5–6).
 fn build_csr<'m>(
     resolve: &'m Resolve<'m>,
     node_of_pkg: &[u32],
     id_to_pkg: &FxHashMap<&str, u32>,
     total_deps: usize,
+    platform: &PlatformSelection,
 ) -> Result<Csrs<'m>, Error> {
     let mut offsets = Vec::with_capacity(node_of_pkg.len() + 1);
     let mut adj: Vec<u32> = Vec::with_capacity(total_deps);
@@ -696,12 +721,15 @@ fn build_csr<'m>(
             let Some(raw) = dep.dep_kinds else {
                 return Err(no_dep_kinds());
             };
-            let fold = fold_raw_dep_kinds(raw)
+            let fold = fold_raw_dep_kinds(raw, platform)
                 .map_err(|source| Error::CargoMetadataUnparseable { source })?;
             if fold.entries == 0 {
                 return Err(no_dep_kinds());
             }
-            if !fold.has_normal() {
+            // An edge with no normal entry is not in the graph at all; one whose every normal
+            // entry is conditional on a platform outside the selection is in the document but
+            // not in this run's graph, and gets no edge id either.
+            if !fold.has_normal() || !fold.has_active_normal() {
                 continue;
             }
             if fold.all_normal_targeted() {
@@ -1027,6 +1055,10 @@ pub struct KindFold {
     pub normal: u32,
     /// Number of normal entries with a non-null `target`.
     pub normal_targeted: u32,
+    /// Number of normal entries the platform selection the fold was taken under activates.
+    /// An entry with no `target` is unconditional and always counts, so under
+    /// [`PlatformSelection::all`] this equals [`KindFold::normal`].
+    pub normal_active: u32,
 }
 
 impl KindFold {
@@ -1036,6 +1068,13 @@ impl KindFold {
         self.normal > 0
     }
 
+    /// Whether any normal entry is activated by the platform selection the fold was taken
+    /// under — the edge belongs to *this run's* graph (§4.2).
+    #[must_use]
+    pub const fn has_active_normal(&self) -> bool {
+        self.normal_active > 0
+    }
+
     /// Whether every normal entry is platform-conditional (§4.2, §4.7).
     #[must_use]
     pub const fn all_normal_targeted(&self) -> bool {
@@ -1043,27 +1082,41 @@ impl KindFold {
     }
 }
 
-/// Folds `dep.dep_kinds` without allocating: the raw slice is re-scanned by a
-/// `Visitor` that only counts. An absent array folds to zero entries.
+/// Folds `dep.dep_kinds` over every platform: the raw slice is re-scanned by a `Visitor`
+/// that only counts. An absent array folds to zero entries.
+///
+/// Every normal entry counts as active, so [`KindFold::normal_active`] equals
+/// [`KindFold::normal`]; the platform-filtered fold is internal to [`Graph::build_for_platforms`].
 ///
 /// # Errors
 ///
 /// Returns the JSON error when the raw slice is not an array of objects.
 pub fn fold_dep_kinds(dep: &Dep<'_>) -> Result<KindFold, serde_json::Error> {
-    dep.dep_kinds.map_or_else(|| Ok(KindFold::default()), fold_raw_dep_kinds)
+    let all = PlatformSelection::all();
+    dep.dep_kinds.map_or_else(|| Ok(KindFold::default()), |raw| fold_raw_dep_kinds(raw, &all))
 }
 
-/// Folds one raw `dep_kinds` array; see [`fold_dep_kinds`].
-fn fold_raw_dep_kinds(raw: &RawValue) -> Result<KindFold, serde_json::Error> {
+/// Folds one raw `dep_kinds` array under `platform`; see [`fold_dep_kinds`].
+///
+/// A `target` string is decoded per entry, borrowed from the JSON buffer wherever it needs no
+/// unescaping, and handed to [`PlatformSelection::activates`]. Under
+/// [`PlatformSelection::all`] that call answers `true` without looking at the string, so the
+/// default path costs one borrow and no expression parse.
+fn fold_raw_dep_kinds(
+    raw: &RawValue,
+    platform: &PlatformSelection,
+) -> Result<KindFold, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(raw.get());
-    let fold = (&mut deserializer).deserialize_seq(FoldVisitor)?;
+    let fold = (&mut deserializer).deserialize_seq(FoldVisitor { platform })?;
     deserializer.end()?;
     Ok(fold)
 }
 
-struct FoldVisitor;
+struct FoldVisitor<'p> {
+    platform: &'p PlatformSelection,
+}
 
-impl<'de> Visitor<'de> for FoldVisitor {
+impl<'de> Visitor<'de> for FoldVisitor<'_> {
     type Value = KindFold;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1072,26 +1125,34 @@ impl<'de> Visitor<'de> for FoldVisitor {
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut fold = KindFold::default();
-        while let Some(entry) = seq.next_element::<EntryFlags>()? {
+        while let Some(entry) = seq.next_element::<EntryFlags<'de>>()? {
             fold.entries += 1;
-            if entry.normal {
-                fold.normal += 1;
-                if entry.targeted {
-                    fold.normal_targeted += 1;
-                }
+            if !entry.normal {
+                continue;
+            }
+            fold.normal += 1;
+            let Some(target) = entry.target else {
+                fold.normal_active += 1;
+                continue;
+            };
+            fold.normal_targeted += 1;
+            if self.platform.activates(&target) {
+                fold.normal_active += 1;
             }
         }
         Ok(fold)
     }
 }
 
-/// One `dep_kinds` entry reduced to "is normal" and "has a target".
-struct EntryFlags {
+/// One `dep_kinds` entry reduced to "is normal" and the condition it carries.
+struct EntryFlags<'a> {
     normal: bool,
-    targeted: bool,
+    /// The `cfg(...)` expression or bare target triple the entry is conditional on, or
+    /// `None` for an unconditional entry.
+    target: Option<Cow<'a, str>>,
 }
 
-impl<'de> Deserialize<'de> for EntryFlags {
+impl<'de> Deserialize<'de> for EntryFlags<'de> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_map(EntryVisitor)
     }
@@ -1100,7 +1161,7 @@ impl<'de> Deserialize<'de> for EntryFlags {
 struct EntryVisitor;
 
 impl<'de> Visitor<'de> for EntryVisitor {
-    type Value = EntryFlags;
+    type Value = EntryFlags<'de>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a `dep_kinds` entry object")
@@ -1108,17 +1169,54 @@ impl<'de> Visitor<'de> for EntryVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         // `kind` defaults to normal when absent, matching cargo's own serialisation.
-        let mut flags = EntryFlags { normal: true, targeted: false };
+        let mut flags = EntryFlags { normal: true, target: None };
         while let Some(key) = map.next_key::<EntryField>()? {
             match key {
                 EntryField::Kind => flags.normal = map.next_value::<IsNull>()?.0,
-                EntryField::Target => flags.targeted = !map.next_value::<IsNull>()?.0,
+                EntryField::Target => flags.target = map.next_value::<MaybeTarget<'de>>()?.0,
                 EntryField::Other => {
                     map.next_value::<IgnoredAny>()?;
                 }
             }
         }
         Ok(flags)
+    }
+}
+
+/// A `dep_kinds` entry's `target`: `None` for JSON `null`, and borrowed straight out of the
+/// metadata buffer whenever the string needs no unescaping — which every real `cfg(...)`
+/// expression and target triple does.
+struct MaybeTarget<'a>(Option<Cow<'a, str>>);
+
+impl<'de> Deserialize<'de> for MaybeTarget<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TargetVisitor;
+
+        impl<'de> Visitor<'de> for TargetVisitor {
+            type Value = MaybeTarget<'de>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("null or a `cfg(...)` expression or target triple")
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(MaybeTarget(None))
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(MaybeTarget(None))
+            }
+
+            fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+                Ok(MaybeTarget(Some(Cow::Borrowed(value))))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(MaybeTarget(Some(Cow::Owned(value.to_owned()))))
+            }
+        }
+
+        deserializer.deserialize_any(TargetVisitor)
     }
 }
 

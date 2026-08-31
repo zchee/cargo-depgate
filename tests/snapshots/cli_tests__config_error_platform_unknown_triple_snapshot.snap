@@ -1,0 +1,9 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stderr(&output)
+---
+error: graph.platform: unknown target platform `x86_64-pc-windows-mvsc`; expected `all`, `host`, or a target triple rustc knows (see `rustc --print target-list`)
+ --> <ROOT>/tests/fixtures/ws-config-errors/platform-unknown-triple.toml:4:41
+  |
+4 | platform = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-mvsc"]
+  |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^ here

@@ -8,6 +8,7 @@ use crate::{
     features::Selection,
     manifest::{ManifestReport, ManifestViolation},
     pipeline::Outcome,
+    platform::PlatformSelection,
     rules::{Match, SealedEntry},
     timings::{Counters, Timings},
 };
@@ -62,6 +63,7 @@ fn outcome(
         workspace_root: root.to_path_buf(),
         member_versions,
         features: Some(FeatureSelection::Default),
+        platform: PlatformSelection::all(),
         counters: Counters {
             rules: violation_count.max(1),
             violations: violation_count,

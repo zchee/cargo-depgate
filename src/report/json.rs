@@ -8,6 +8,7 @@ use crate::{
     config::{FeatureSelection, Span},
     features::Selection,
     manifest,
+    platform::PlatformSelection,
     rules::{Match, SealedEntry, Violation, WitnessHop},
     timings::{Counters, Phase},
 };
@@ -19,6 +20,15 @@ struct Report<'a> {
     tool: &'static str,
     version: &'static str,
     features: serde_json::Value,
+    /// The resolved target triples the run narrowed the graph to.
+    ///
+    /// Absent under the default selection, which is every platform: a report of an unnarrowed
+    /// run is then byte-for-byte the one it produced before this key existed, exactly as
+    /// `features` and `activation_pruned` are absent from an unnarrowed rule record. `host` is
+    /// reported as the triple it resolved to, so the document says which platform was gated on
+    /// rather than which word was typed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    platform: Option<Vec<&'a str>>,
     timings: TimingsJson,
     counters: CountersJson,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -258,6 +268,7 @@ pub fn render(
         tool: ctx.tool,
         version: ctx.version,
         features: features_json(outcome.features.as_ref()),
+        platform: platform_json(&outcome.platform),
         timings: TimingsJson::from_outcome(outcome),
         counters: outcome.counters.into(),
         rules: rules(outcome),
@@ -284,6 +295,11 @@ fn features_json(features: Option<&FeatureSelection>) -> serde_json::Value {
             features.iter().cloned().map(serde_json::Value::String).collect(),
         ),
     }
+}
+
+/// The selected triples, or `None` for the default selection so the key stays absent.
+fn platform_json(platform: &PlatformSelection) -> Option<Vec<&'static str>> {
+    (!platform.is_all()).then(|| platform.triples().collect())
 }
 
 /// One rule's effective feature selection, spelled the way the policy key spells it.

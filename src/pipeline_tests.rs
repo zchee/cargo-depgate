@@ -75,6 +75,7 @@ fn args(root: &Path, config_path: Option<PathBuf>) -> CheckArgs {
             ..MetadataOptions::default()
         },
         config_path,
+        platform: None,
     }
 }
 
@@ -85,6 +86,7 @@ fn explain_args(root: &Path, config_path: PathBuf, package: &str, dependency: &s
             ..MetadataOptions::default()
         },
         config_path: Some(config_path),
+        platform: None,
         package: package.to_owned(),
         dependency: dependency.to_owned(),
     }
@@ -133,6 +135,7 @@ fn explicit_phase_a_error_does_not_spawn_cargo() {
     let check_args = CheckArgs {
         metadata: MetadataOptions { cargo: Some(cargo.clone()), ..MetadataOptions::default() },
         config_path: Some(config_path),
+        platform: None,
     };
     let (result, stderr) = run_check(&check_args);
 
@@ -186,6 +189,7 @@ fn phase_a_error_matches_explicit_and_discovered_config() {
     let explicit_args = CheckArgs {
         metadata: MetadataOptions { cargo: Some(cargo.clone()), ..MetadataOptions::default() },
         config_path: Some(config_path),
+        platform: None,
     };
     let (explicit_result, explicit_stderr) = run_check(&explicit_args);
     let explicit_error = explicit_result.expect_err("explicit phase-A configuration should fail");

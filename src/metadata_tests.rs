@@ -2,6 +2,8 @@
 
 use std::{io::Cursor, time::Duration};
 
+use flate2::read::GzDecoder;
+
 use super::*;
 use crate::graph::{Graph, fold_dep_kinds};
 
@@ -17,6 +19,20 @@ use crate::graph::{Graph, fold_dep_kinds};
 /// 5 `build-helper`                → (none)
 /// 6 `isolated` (isolated node)    → (none)
 pub(crate) const ROOT: &str = "/ws/proj";
+
+/// One committed example workspace's `cargo metadata` document, decompressed.
+///
+/// `directory` is repository-relative, such as `tests/fixtures/lemmy-439734d`. The documents
+/// are the only real-world input the suite has, so both differential tests — the feature walk
+/// against guppy's feature graph, and the platform filter against guppy's host-enabled package
+/// graph — read them through this one loader.
+pub(crate) fn example_document(directory: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(directory).join("metadata.json.gz");
+    let compressed = std::fs::File::open(&path).expect("the example fixture is readable");
+    let mut json = String::new();
+    GzDecoder::new(compressed).read_to_string(&mut json).expect("the example fixture decompresses");
+    json
+}
 
 pub(crate) fn fixture_json() -> String {
     format!(

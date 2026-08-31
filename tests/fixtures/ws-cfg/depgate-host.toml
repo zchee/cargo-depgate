@@ -1,0 +1,10 @@
+schema = 1
+
+[graph]
+platform = "host"
+
+[manifest]
+versions-in-root = false
+
+[rules.app]
+deny = ["winonly"]

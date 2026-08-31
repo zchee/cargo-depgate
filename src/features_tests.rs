@@ -1,8 +1,7 @@
 #![expect(clippy::expect_used, reason = "test bodies assert directly")]
 
-use std::{collections::BTreeSet, fs, io::Read as _, path::PathBuf};
+use std::collections::BTreeSet;
 
-use flate2::read::GzDecoder;
 use guppy::{
     PackageId,
     graph::{DependencyDirection, PackageGraph, feature::StandardFeatures},
@@ -13,6 +12,7 @@ use super::*;
 use crate::{
     graph::Scratch,
     metadata::{Meta, MetadataBuffer, parse},
+    platform::PlatformSelection,
 };
 
 /// One declared dependency of a synthetic package.
@@ -218,26 +218,45 @@ impl Workspace {
                     .filter(|declaration| seen.insert((declaration.package, declaration.version)))
                     .map(|declaration| {
                         let target = self.find(declaration.package, declaration.version);
+                        // Cargo records one `dep_kinds` entry per *declaration* of the edge,
+                        // so a name declared both unconditionally and in a `[target.'cfg(…)']`
+                        // table carries both, and a name declared only conditionally carries
+                        // just the conditional one. The platform filter reads exactly this.
+                        let kinds = package
+                            .decls
+                            .iter()
+                            .filter(|other| {
+                                other.kind.is_none()
+                                    && other.package == declaration.package
+                                    && other.version == declaration.version
+                            })
+                            .map(|other| {
+                                let target = other.target.map_or_else(
+                                    || "null".to_owned(),
+                                    |target| format!("\"{target}\""),
+                                );
+                                format!(r#"{{"kind":null,"target":{target}}}"#)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
                         format!(
-                            r#"{{"name":"{}","pkg":"{}","dep_kinds":[{{"kind":null,"target":null}}]}}"#,
+                            r#"{{"name":"{}","pkg":"{}","dep_kinds":[{kinds}]}}"#,
                             declaration.resolved_name(),
                             target.id()
                         )
                     })
                     .collect::<Vec<_>>()
                     .join(",");
-                let activated = package.activated.clone().unwrap_or_else(|| {
-                    package.features.iter().map(|(name, _)| *name).collect()
-                });
+                let activated = package
+                    .activated
+                    .clone()
+                    .unwrap_or_else(|| package.features.iter().map(|(name, _)| *name).collect());
                 let activated = activated
                     .iter()
                     .map(|feature| format!("\"{feature}\""))
                     .collect::<Vec<_>>()
                     .join(",");
-                format!(
-                    r#"{{"id":"{}","deps":[{deps}],"features":[{activated}]}}"#,
-                    package.id()
-                )
+                format!(r#"{{"id":"{}","deps":[{deps}],"features":[{activated}]}}"#, package.id())
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -254,11 +273,15 @@ impl Workspace {
     }
 
     fn graph(&self) -> Graph<'static> {
+        self.graph_for(&PlatformSelection::all())
+    }
+
+    fn graph_for(&self, platform: &PlatformSelection) -> Graph<'static> {
         let buffer: &'static MetadataBuffer =
             Box::leak(Box::new(MetadataBuffer::from_bytes(self.json().into_bytes())));
         let meta: &'static Meta<'static> =
             Box::leak(Box::new(parse(buffer).expect("synthetic metadata parses")));
-        Graph::build(meta).expect("synthetic graph builds")
+        Graph::build_for_platforms(meta, platform).expect("synthetic graph builds")
     }
 }
 
@@ -809,12 +832,7 @@ const FIXTURES: &[Fixture] = &[
 ];
 
 fn fixture_json(fixture: &Fixture) -> String {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(fixture.directory).join("metadata.json.gz");
-    let compressed = fs::File::open(&path).expect("the example fixture is readable");
-    let mut json = String::new();
-    GzDecoder::new(compressed).read_to_string(&mut json).expect("the example fixture decompresses");
-    json
+    crate::metadata::tests::example_document(fixture.directory)
 }
 
 #[test]
@@ -1043,4 +1061,101 @@ fn one_walk_reused_across_selections_answers_as_a_fresh_walk_would() {
         let fresh = activate(&graph, app, selection).expect("a fresh walk runs");
         assert_eq!(reused, fresh, "reuse must not change the answer for {selection}");
     }
+}
+
+/// `app` reaches `winonly` only through a `cfg(windows)` declaration and `feat` only through a
+/// feature, so a platform selection and a feature selection each remove a different edge.
+fn platform_and_feature_workspace() -> Workspace {
+    Workspace::new(vec![
+        Pkg::new("app")
+            .feature("win-extra", &["dep:feat"])
+            .decl(Decl::new("winonly").target("cfg(windows)"))
+            .decl(Decl::new("feat").optional())
+            .decl(Decl::new("always")),
+        Pkg::new("winonly"),
+        Pkg::new("feat"),
+        Pkg::new("always"),
+    ])
+}
+
+#[test]
+fn a_platform_filter_and_a_feature_selection_narrow_independently() {
+    let workspace = platform_and_feature_workspace();
+    let linux = PlatformSelection::resolve(&["x86_64-unknown-linux-gnu".to_owned()])
+        .expect("the triple resolves");
+
+    // Each dimension removes its own edge and neither removes the other's: the platform filter
+    // decides which edges exist, the walk decides which of those a build turns on.
+    let every = workspace.graph();
+    let app = member(&every, "app");
+    assert_eq!(reached(&every, app, &Selection::All), names(&["always", "feat", "winonly"]));
+    assert_eq!(reached(&every, app, &Selection::Default), names(&["always", "winonly"]));
+
+    let narrowed = workspace.graph_for(&linux);
+    let app = member(&narrowed, "app");
+    assert_eq!(
+        reached(&narrowed, app, &Selection::All),
+        names(&["always", "feat"]),
+        "all features cannot bring back an edge no selected platform compiles"
+    );
+    assert_eq!(
+        reached(&narrowed, app, &Selection::Default),
+        names(&["always"]),
+        "both narrowings apply at once"
+    );
+}
+
+#[test]
+fn an_activation_over_a_filtered_graph_masks_only_the_edges_that_graph_has() {
+    // The activation's edge set is a mask over CSR edge ids, so it has to be sized to the
+    // filtered CSR — a mask built for the wider graph would address edges by the wrong ids, and
+    // `reach_activated` would reject it outright. This is what makes the two narrowings compose
+    // without either knowing about the other.
+    let workspace = platform_and_feature_workspace();
+    let linux = PlatformSelection::resolve(&["x86_64-unknown-linux-gnu".to_owned()])
+        .expect("the triple resolves");
+    let graph = workspace.graph_for(&linux);
+    let app = member(&graph, "app");
+    let activation = activate(&graph, app, &Selection::All).expect("the walk runs");
+
+    assert_eq!(activation.edges().len(), graph.edge_count() as usize);
+    assert_eq!(graph.edge_count(), 2, "the cfg(windows) edge is not in this graph");
+
+    // And the masked BFS agrees with the walk, on the filtered graph, without an assertion
+    // failure about a mask from another graph.
+    let mut scratch = Scratch::new(&graph);
+    let reach = graph.reach_activated(app, activation.edges(), &mut scratch);
+    assert!(reach.contains_node(activation.root()));
+    for node in activation.nodes().ones() {
+        let node = u32::try_from(node).expect("a node id fits");
+        assert!(reach.contains_node(node), "{} is activated but not reached", graph.name(node));
+    }
+}
+
+#[test]
+fn the_all_features_guard_is_unaffected_by_a_platform_filter() {
+    // The guard compares each member's declared `[features]` table against the features the
+    // resolve activated for it. Neither side is an edge, so narrowing the edge set cannot move
+    // it — a policy that needs the guard gets the same verdict whatever platform it gates on.
+    // Asserted rather than argued, because a guard that silently started passing would let a
+    // feature-aware rule narrow a closure that is not a subset of the document.
+    let workspace = Workspace::new(vec![
+        Pkg::new("app")
+            .feature("win-extra", &["dep:winonly"])
+            .feature("off", &[])
+            .activated(&["win-extra"])
+            .decl(Decl::new("winonly").target("cfg(windows)").optional()),
+        Pkg::new("winonly"),
+    ]);
+    let unfiltered = first_unactivated_member(&workspace.graph()).expect("the guard runs");
+    let linux = PlatformSelection::resolve(&["x86_64-unknown-linux-gnu".to_owned()])
+        .expect("the triple resolves");
+    let filtered = first_unactivated_member(&workspace.graph_for(&linux)).expect("the guard runs");
+
+    assert_eq!(
+        unfiltered,
+        Some(UnactivatedMember { package: "app".to_owned(), unactivated: 1 }),
+        "`off` is declared and not activated, so the guard has to catch it"
+    );
+    assert_eq!(filtered, unfiltered, "the platform filter must not move the guard's verdict");
 }

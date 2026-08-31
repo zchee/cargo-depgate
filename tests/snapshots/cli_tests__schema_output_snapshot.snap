@@ -11,6 +11,10 @@ expression: cleaned_stdout(&output)
         "features": {
           "$ref": "#/$defs/FeatureValue",
           "description": "Cargo feature selection: `default`, `all`, or a list of feature specs."
+        },
+        "platform": {
+          "$ref": "#/$defs/PlatformValue",
+          "description": "Target-platform selection: `all`, `host`, or a list of target triples."
         }
       },
       "type": "object"
@@ -140,6 +144,22 @@ expression: cleaned_stdout(&output)
         }
       ],
       "description": "The non-spanned feature input accepted by TOML and the schema generator."
+    },
+    "PlatformValue": {
+      "anyOf": [
+        {
+          "description": "A named selection (`all` or `host`).",
+          "type": "string"
+        },
+        {
+          "description": "Explicit target triples.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "The non-spanned platform input accepted by TOML and the schema generator."
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

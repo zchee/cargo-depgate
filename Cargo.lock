@@ -148,6 +148,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "cargo_metadata",
+ "cfg-expr",
  "clap",
  "clap-cargo",
  "divan",
