@@ -1,0 +1,10 @@
+schema = 1
+
+[manifest]
+versions-in-root = false
+
+[rules.app]
+require = ["core", "u*"]
+
+[rules.core]
+require = ["ui", "app", "no-such-*"]

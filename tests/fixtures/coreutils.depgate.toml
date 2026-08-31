@@ -5,19 +5,26 @@
 #   if cargo tree -p coreutils --no-default-features --features feat_os_unix \
 #        -e normal -i ariadne 2>/dev/null; then ... exit 1; fi
 #
-# The documented invocation is `--no-default-features --features feat_os_unix`,
-# and the fixture's metadata document is generated with exactly those flags
-# (see scripts/fixture.sh); the gate's own feature flags are inert under
-# `--metadata-json`.
+# The fixture's metadata document is generated with `--all-features` (see
+# scripts/fixture.sh), which is what the `features` key below requires: an
+# activation walk narrows soundly only from a document that left no member's
+# features off. The gate's own feature flags stay inert under `--metadata-json`;
+# the selection that matters is the rule's.
 #
-# This rule FIRES at the pinned commit, and the fixture records that: the gate
-# reports `coreutils -> uucore -> ariadne (optional)`. coreutils' own CI is
-# green here. The difference is not a defect in either -- `ariadne` is declared
-# `optional = true` by `uucore`, and the workspace-unified resolve keeps an
-# optional edge any member activates even under the documented flags. The gate
-# walks that superset by design (README, "Cargo feature gap table").
-# `cargo tree -p coreutils --no-default-features ...` asks the narrower,
-# feature-resolved question that schema 1 cannot ask.
+# `features = ["feat_os_unix"]` is the flag pair above -- a list is resolved as
+# `--no-default-features --features ...` -- so the rule asks the question the
+# step asks, rooted at the same package, and passes.
+#
+# Without the key the same rule fires with
+# `coreutils -> uucore -> ariadne (optional; present via workspace feature
+# unification)`, and neither result is wrong. `uucore` declares `ariadne`
+# optional behind its `diagnostics` feature, and the resolve is unified over
+# every member, kind and platform, so the edge is in it twice over: this
+# document activates every member's features, and even the flag pair upstream
+# documents would leave it there, because `uu_csplit` and `uu_numfmt` request
+# `uucore/diagnostics` from their `[dev-dependencies]` while the upstream
+# command carries `-e normal`. The activation walk starts from `coreutils` and
+# follows normal edges only, which is why it does not reach it.
 schema = 1
 
 # coreutils' root manifest names versions on its `uu_*` path dependencies
@@ -27,4 +34,5 @@ schema = 1
 versions-in-root = false
 
 [rules.coreutils]
+features = ["feat_os_unix"]
 deny = ["ariadne"]

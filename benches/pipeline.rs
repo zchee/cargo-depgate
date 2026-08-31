@@ -35,8 +35,10 @@ use divan::{Bencher, black_box, counter::BytesCount};
 use flate2::read::GzDecoder;
 
 // The real-fixture benchmarks run on lemmy, the largest of the three committed examples
-// (3,526,964 decompressed bytes against ckb's 3,367,042 and coreutils' 2,026,143), so the
+// (4,073,164 decompressed bytes against ckb's 3,367,042 and coreutils' 2,081,351), so the
 // parse-rate and pipeline numbers describe the worst case the gate actually ships with.
+// lemmy and coreutils are resolved with --all-features, which their feature-aware rules
+// require, so both documents are larger than a default resolve of the same commit.
 const REAL_GZIP_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/lemmy-439734d/metadata.json.gz");
 const REAL_FIXTURE_ROOT: &str =
@@ -46,16 +48,16 @@ const REAL_CONFIG_PATH: &str =
 
 /// The pinned shape of the lemmy fixture at `439734d`, asserted once so a fixture swap
 /// cannot silently move the real-fixture numbers.
-const REAL_JSON_BYTES: usize = 3_526_964;
-const REAL_PACKAGES: u32 = 707;
+const REAL_JSON_BYTES: usize = 4_073_164;
+const REAL_PACKAGES: u32 = 833;
 const REAL_MEMBERS: usize = 41;
 
 // The SYNTHETIC_* ratios below are deliberately fixed constants of the generator, not a
 // description of any committed fixture. They were calibrated once against a 585-package /
 // 1,586-edge / 529-name real workspace that this repository no longer ships, and they are kept
 // verbatim so the scaling curve -- and the AC-P* bounds derived from it -- stay comparable
-// across a fixture swap. They are not lemmy's statistics: lemmy resolves 707 packages onto 603
-// names, 70 of them at two or more versions. Nothing reads them except the generator; the
+// across a fixture swap. They are not lemmy's statistics: lemmy resolves 833 packages onto 704
+// names, 83 of them at two or more versions. Nothing reads them except the generator; the
 // real-fixture benchmarks above measure the fixture itself.
 const SYNTHETIC_PACKAGE_BYTES: usize = 4_146;
 const SYNTHETIC_NORMAL_EDGES_PER_PACKAGE: usize = 5;
@@ -109,9 +111,17 @@ impl BenchProfile {
         }
     }
 
+    /// The AC-P6b ceiling on the synthetic 20k graph's non-parse own work.
+    ///
+    /// The dev bound is 30.0, re-derived on 2026-08-31 (plan §6) from the 20.0 it
+    /// shipped at: the measurement reads 19.221 ms with a spread of 18.81-19.59, which
+    /// leaves 2-4% and would flake rather than catch anything. Against v0.1.0's
+    /// 15.270/17.521 ms and the wave-A tip's 17.607 ms the drift sits at or under this
+    /// measurement's ~2 ms noise floor, so no single change accounts for it. 30.0 is
+    /// 1.56x the measurement; the ci bound already carried that much headroom and stays.
     const fn own_work_ms(self) -> f64 {
         match self {
-            Self::Dev => 20.0,
+            Self::Dev => 30.0,
             Self::Ci => 60.0,
         }
     }
@@ -145,6 +155,36 @@ static REAL_CONFIG: LazyLock<Config> = LazyLock::new(|| {
     config::validate(&raw, Some(&REAL_GRAPH))
         .expect("validate hermetic depgate config against graph")
         .config
+});
+
+/// The whole-graph feature-aware policy: one `deny` rule rooted at `lemmy_server`, the
+/// member that closes over every other, under `features = "all"` so the rule is answered by
+/// an activation walk rather than the unified closure, and naming a package the graph does
+/// not carry so no match cuts the walk short.
+///
+/// It is written here rather than read from `tests/fixtures/lemmy.depgate.toml` for the
+/// reason `scripts/perf.sh` writes its own: the committed policy is free to change shape,
+/// and this case has to keep timing one fixed workload. It is the same rule the
+/// `AC-P2-feature-own-work` gate measures, so the two numbers stay comparable.
+const REAL_FEATURE_CONFIG_TEXT: &str = concat!(
+    "schema = 1\n\n",
+    "[manifest]\nversions-in-root = false\n\n",
+    "[rules.lemmy_server]\n",
+    "features = \"all\"\n",
+    "deny = [\"depgate-perf-absent-package\"]\n",
+);
+
+static REAL_FEATURE_CONFIG: LazyLock<Config> = LazyLock::new(|| {
+    let raw: config::RawConfig =
+        toml::from_str(REAL_FEATURE_CONFIG_TEXT).expect("parse whole-graph feature policy");
+    let config = config::validate(&raw, Some(&REAL_GRAPH))
+        .expect("validate whole-graph feature policy against graph")
+        .config;
+    assert!(
+        config.rules.iter().all(|rule| rule.features.is_some()),
+        "the whole-graph benchmark must keep measuring the feature-aware path"
+    );
+    config
 });
 
 static REAL_METADATA_TEMP: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
@@ -265,6 +305,24 @@ fn real_graph(bencher: Bencher) {
 fn real_rules(bencher: Bencher) {
     let graph = &*REAL_GRAPH;
     let config = &*REAL_CONFIG;
+    let mut scratch = Scratch::new(graph);
+    bencher.bench_local(|| {
+        black_box(rules::evaluate(graph, config, &mut scratch));
+    });
+}
+
+/// Rule evaluation under a single rule whose activation reaches the whole graph (AC 14):
+/// the worst case the feature-aware path has on this fixture, since one root that closes
+/// over every member leaves the walk nothing to prune.
+///
+/// It is not comparable to [`real_rules`] as a before/after pair — that one measures the
+/// committed policy, which is three rules and already feature-aware. The unified/narrowed
+/// comparison is `scripts/perf.sh`'s, between its two script-owned policies, which differ
+/// only in the `features` key.
+#[divan::bench(sample_count = 5, sample_size = 1)]
+fn real_rules_feature_all(bencher: Bencher) {
+    let graph = &*REAL_GRAPH;
+    let config = &*REAL_FEATURE_CONFIG;
     let mut scratch = Scratch::new(graph);
     bencher.bench_local(|| {
         black_box(rules::evaluate(graph, config, &mut scratch));

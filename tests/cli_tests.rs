@@ -132,6 +132,10 @@ impl Example {
     }
 }
 
+fn require_fixture_root() -> PathBuf {
+    repository_root().join("tests/fixtures/ws-require")
+}
+
 fn config_error_fixture_root() -> PathBuf {
     repository_root().join("tests/fixtures/ws-config-errors")
 }
@@ -930,6 +934,105 @@ fn ws_violations_github_report_snapshot() {
 }
 
 #[test]
+fn ws_require_human_report_snapshot() {
+    let output = fixture_check_with_options(&require_fixture_root(), &["--format", "human"], false);
+
+    assert_eq!(output.status.code(), Some(1), "require human check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_require_json_report_snapshot() {
+    let output = fixture_check_with_options(&require_fixture_root(), &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(1), "require JSON check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn ws_require_github_report_snapshot() {
+    let output = fixture_check_with_options(&require_fixture_root(), &[], true);
+
+    assert_eq!(output.status.code(), Some(1), "require GitHub check failed: {output:?}");
+    insta::with_settings!({
+        filters => vec![SNAPSHOT_ROOT_FILTER, SNAPSHOT_TIMINGS_FILTER]
+    }, {
+        insta::assert_snapshot!(cleaned_stdout(&output));
+    });
+}
+
+#[test]
+fn require_reports_only_the_patterns_that_matched_nothing() {
+    // The pass/fail split of the fixture policy: `rules.app.require` is satisfied by an
+    // exact name and a glob, while `rules.core.require` matches `ui` and misses the other
+    // two — the partial miss is what proves matched patterns are never listed.
+    let output = fixture_check_with_options(&require_fixture_root(), &["--format", "json"], false);
+
+    assert_eq!(output.status.code(), Some(1), "require check failed: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("require report should be JSON");
+    let violations = report["violations"].as_array().expect("report should contain violations");
+    assert_eq!(violations.len(), 1, "the satisfied rule contributes no violation: {violations:?}");
+    let violation = &violations[0];
+
+    assert_eq!(violation["rule_id"], "rules.core.require");
+    assert_eq!(violation["kind"], "require");
+    assert_eq!(violation["package"], "core");
+    assert_eq!(violation["missing"], serde_json::json!(["app", "no-such-*"]));
+    assert_eq!(violation["matches"], serde_json::json!([]), "a matched pattern carries no witness");
+    assert_eq!(violation["extra"], serde_json::json!([]));
+    assert_eq!(
+        report["counters"]["matches"].as_u64(),
+        Some(0),
+        "the counter sums names the rules found, and a require miss is a name not found"
+    );
+}
+
+#[test]
+fn require_is_satisfied_by_a_name_present_only_through_an_optional_edge() {
+    // `require` reads exactly the closure `deny` reads, so an optional dependency that the
+    // selected features activate satisfies it: the same unified closure, the same answer.
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let config_dir = tempfile::tempdir().expect("temporary require config should be creatable");
+    let config = config_dir.path().join("depgate.toml");
+    fs::write(
+        &config,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.app]\nrequire = [\"reqwest-like\"]\n",
+    )
+    .expect("require config should be writable");
+
+    let enabled = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &config,
+        &["--features", "app/net"],
+        false,
+    );
+    assert_eq!(
+        enabled.status.code(),
+        Some(0),
+        "an activated optional edge satisfies require: {enabled:?}"
+    );
+
+    let disabled =
+        check_with_manifest_and_config(Some(&fixture.join("Cargo.toml")), &config, &[], false);
+    assert_eq!(
+        disabled.status.code(),
+        Some(1),
+        "with the feature off the name is absent from the closure: {disabled:?}"
+    );
+    let stdout = cleaned_stdout(&disabled);
+    assert!(stdout.contains("  -reqwest-like"), "the unmatched pattern is listed: {stdout}");
+}
+
+#[test]
 fn config_error_bad_glob_snapshot() {
     let output = config_error_check("bad-glob");
 
@@ -1100,12 +1203,12 @@ fn lemmy_metadata_check_passes_with_pinned_graph_counters() {
     assert_counters(
         &report,
         &ExpectedCounters {
-            packages: 707,
+            packages: 833,
             members: 41,
-            normal_edges: 2_444,
-            names: 603,
-            superset_extra_edges: 311,
-            rules: 1,
+            normal_edges: 2_950,
+            names: 704,
+            superset_extra_edges: 400,
+            rules: 3,
             violations: 0,
         },
     );
@@ -1183,84 +1286,176 @@ fn ckb_metadata_check_counters_snapshot() {
 }
 
 #[test]
-fn coreutils_metadata_check_reports_the_optional_ariadne_edge() {
+fn coreutils_metadata_check_passes_on_the_feature_selection_its_ci_documents() {
     let (_temp, output) = example_check(&COREUTILS, &["--format", "json", "--offline"]);
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "coreutils metadata check should violate: {output:?}"
-    );
+    assert_eq!(output.status.code(), Some(0), "coreutils metadata check failed: {output:?}");
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("coreutils report should be valid JSON");
     assert_counters(
         &report,
         &ExpectedCounters {
-            packages: 498,
+            packages: 512,
             members: 114,
-            normal_edges: 1_453,
-            names: 468,
-            superset_extra_edges: 329,
+            normal_edges: 1_493,
+            names: 482,
+            superset_extra_edges: 358,
             rules: 1,
-            violations: 1,
+            violations: 0,
         },
     );
+    assert_eq!(
+        report["violations"].as_array().map(Vec::len),
+        Some(0),
+        "`features = [\"feat_os_unix\"]` asks the question CICD.yml asks: {report}"
+    );
+}
+
+#[test]
+fn coreutils_human_report_names_the_closure_that_compiled_ariadne_out() {
+    let (_temp, output) = example_check(&COREUTILS, &["--offline"]);
+
+    assert_eq!(output.status.code(), Some(0), "coreutils human check should pass: {output:?}");
+    // `docs/examples.md` quotes this line verbatim: the pruned count is what distinguishes
+    // "the selection compiled it out" from "the name was never in the graph".
+    assert_eq!(
+        cleaned_stdout(&output),
+        "ok rules.coreutils.deny (features = [\"feat_os_unix\"], 43 pruned)\n\
+         ok: 1 rules, 0 violations\n"
+    );
+}
+
+#[test]
+fn coreutils_without_the_feature_key_still_reports_the_optional_ariadne_edge() {
+    // The other arm of the same fixture, and the reason the key exists: on the unified
+    // closure the edge is there, because `uu_csplit` and `uu_numfmt` request
+    // `uucore/diagnostics` from their dev-dependencies. Dropping one line from the policy
+    // must bring the finding back, witness and optional annotation included.
+    let (_temp, metadata) = example_metadata_json(&COREUTILS);
+    let config_dir = tempfile::tempdir().expect("temporary unified config should be creatable");
+    let config = config_dir.path().join("depgate.toml");
+    fs::write(
+        &config,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.coreutils]\n\
+         deny = [\"ariadne\"]\n",
+    )
+    .expect("unified config should be writable");
+
+    let output =
+        metadata_check(&metadata, &config, Some(&COREUTILS.fixture_root()), &["--format", "json"]);
+
+    assert_eq!(output.status.code(), Some(1), "the unified closure carries it: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("coreutils report should be valid JSON");
     let records = report["violations"].as_array().expect("violations should be an array");
     assert_eq!(records.len(), 1, "coreutils records drifted at 6341084: {report}");
     let ariadne = &records[0];
     assert_eq!(ariadne["rule_id"], "rules.coreutils.deny");
     assert_eq!(ariadne["kind"], "deny");
+    assert!(ariadne.get("features").is_none(), "a unified rule adds no features key");
     let matched = ariadne["matches"].as_array().expect("matches should be an array");
     assert_eq!(matched.len(), 1);
     assert_eq!(matched[0]["name"], "ariadne");
-    // The witness is the whole point of this example: `ariadne` is reached only through
-    // `uucore`, which declares it `optional = true`. The resolve `cargo metadata` emits is
-    // workspace-unified, so an optional edge any member activates survives the
-    // `--no-default-features --features feat_os_unix` this fixture was generated with, and the
-    // superset the gate walks reports it even though coreutils' own `cargo tree` does not.
-    // `superset_extra_edges` above is the counter that measures the same exposure.
     let witness = matched[0]["witness"].as_array().expect("witness should be an array");
     assert_eq!(witness.len(), 2);
     assert_eq!(witness[0]["name"], "uucore");
     assert_eq!(witness[0]["optional"], serde_json::Value::Bool(false));
     assert_eq!(witness[1]["name"], "ariadne");
     assert_eq!(witness[1]["optional"], serde_json::Value::Bool(true));
-}
 
-#[test]
-fn coreutils_human_report_annotates_the_optional_witness_edge() {
-    let (_temp, output) = example_check(&COREUTILS, &["--offline"]);
-
-    assert_eq!(output.status.code(), Some(1), "coreutils human check should violate: {output:?}");
-    let rendered = cleaned_stdout(&output);
-    let witness = "coreutils v0.10.0 \u{2192} uucore v0.10.0 \u{2192} ariadne v0.6.0 \
+    let human =
+        metadata_check(&metadata, &config, Some(&COREUTILS.fixture_root()), &["--format", "human"]);
+    let rendered = cleaned_stdout(&human);
+    let expected = "coreutils v0.10.0 \u{2192} uucore v0.10.0 \u{2192} ariadne v0.6.0 \
          (optional; present via workspace feature unification)";
-    assert!(rendered.contains(witness), "optional witness {witness:?} missing from: {rendered}");
+    assert!(rendered.contains(expected), "optional witness {expected:?} missing from: {rendered}");
 }
 
 #[test]
 fn coreutils_metadata_check_counters_snapshot() {
     let (_temp, output) = example_check(&COREUTILS, &["--format", "json", "--offline"]);
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "coreutils metadata snapshot should violate: {output:?}"
-    );
+    assert_eq!(output.status.code(), Some(0), "coreutils metadata snapshot failed: {output:?}");
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("coreutils report should be valid JSON");
     assert_counters_snapshot("coreutils_metadata_check_counters_snapshot", report);
 }
 
 #[test]
-fn lemmy_human_report_lists_the_rule_that_matched_nothing() {
+fn lemmy_human_report_lists_every_rule_and_the_closure_each_answered_on() {
     let (_temp, output) = example_check(&LEMMY, &["--offline"]);
 
     assert_eq!(output.status.code(), Some(0), "lemmy human check should pass: {output:?}");
-    // `docs/examples.md` quotes both lines verbatim, and the first one is the point of the
-    // example: a rule that found nothing is still listed, because a green gate that quietly
-    // checked nothing is a failure mode rather than a pass.
-    assert_eq!(cleaned_stdout(&output), "ok rules.lemmy_server.deny\nok: 1 rules, 0 violations\n");
+    // `docs/examples.md` quotes these lines verbatim. Two points live in them: a rule that
+    // found nothing is still listed, because a green gate that quietly checked nothing is a
+    // failure mode rather than a pass; and a rule that passed by narrowing says which closure
+    // answered it and how much of the unified one that removed, so the pass cannot be mistaken
+    // for the workspace-wide claim it is not.
+    assert_eq!(
+        cleaned_stdout(&output),
+        "ok rules.lemmy_server.deny (features = \"default\", 115 pruned)\n\
+         ok rules.lemmy_api_common.deny (features = \"none\", 404 pruned)\n\
+         ok rules.lemmy_api_utils.require (features = \"all\", 31 pruned)\n\
+         ok: 3 rules, 0 violations\n"
+    );
+}
+
+#[test]
+fn lemmy_json_report_records_every_rule_and_the_names_its_selection_removed() {
+    let (_temp, output) = example_check(&LEMMY, &["--format", "json", "--offline"]);
+
+    assert_eq!(output.status.code(), Some(0), "lemmy json check should pass: {output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("lemmy report should be valid JSON");
+    assert_eq!(
+        report["violations"].as_array().map(Vec::len),
+        Some(0),
+        "all three rules pass, which is exactly why `violations[]` cannot carry their evidence"
+    );
+
+    let rules = report["rules"].as_array().expect("a feature-aware policy writes rules[]");
+    assert_eq!(rules.len(), 3, "one record per configured rule, in evaluation order: {report}");
+    for rule in rules {
+        assert_eq!(rule["passed"], serde_json::Value::Bool(true));
+    }
+
+    // The counts are the ones the human report prints and `docs/examples.md` quotes; the names
+    // are what the human line cannot carry and what this array exists to publish. Each named
+    // check is the upstream assertion the rule translates: `extism` is in `lemmy_server`'s
+    // unified closure and the default selection is what removes it (L202/L203), and `diesel`
+    // is in `lemmy_api_common`'s and `--no-default-features` is what removes it (L201).
+    let pruned = |rule: &serde_json::Value| -> Vec<String> {
+        rule["activation_pruned"]
+            .as_array()
+            .expect("a feature-aware record lists the names it pruned")
+            .iter()
+            .map(|name| name.as_str().expect("a pruned name is a string").to_owned())
+            .collect()
+    };
+
+    assert_eq!(rules[0]["id"], "rules.lemmy_server.deny");
+    assert_eq!(rules[0]["kind"], "deny");
+    assert_eq!(rules[0]["features"], serde_json::json!("default"));
+    let server = pruned(&rules[0]);
+    assert_eq!(server.len(), 115);
+    assert!(server.contains(&"extism".to_owned()), "L203's name is what the selection removed");
+
+    assert_eq!(rules[1]["id"], "rules.lemmy_api_common.deny");
+    assert_eq!(rules[1]["kind"], "deny");
+    assert_eq!(rules[1]["features"], serde_json::json!("none"));
+    let api_common = pruned(&rules[1]);
+    assert_eq!(api_common.len(), 404);
+    assert!(api_common.contains(&"diesel".to_owned()), "L201's name is what the selection removed");
+
+    assert_eq!(rules[2]["id"], "rules.lemmy_api_utils.require");
+    assert_eq!(rules[2]["kind"], "require");
+    assert_eq!(rules[2]["features"], serde_json::json!("all"));
+    let api_utils = pruned(&rules[2]);
+    assert_eq!(api_utils.len(), 31);
+    assert!(
+        !api_utils.contains(&"extism".to_owned()),
+        "L204 is the positive assertion: `extism` has to survive this selection, not be pruned"
+    );
 }
 
 #[test]
@@ -1792,5 +1987,139 @@ fn feature_flags_warn_when_metadata_json_makes_them_inert() {
         cleaned_stderr(&output).trim(),
         "warning: --features, --all-features, --no-default-features ignored under \
          --metadata-json; the JSON was produced with its own feature selection"
+    );
+}
+
+#[test]
+fn a_feature_aware_rule_is_refused_on_a_default_features_document() {
+    // ckb has no feature-aware rule, so its document is generated with the default selection
+    // — which is exactly the premise an activation walk may not assume. Adding one to that
+    // document is exit 2 naming the first member that proves it, rather than a narrowed
+    // closure that could pass a `deny` rule for want of an edge that was never resolved.
+    let (_temp, metadata) = example_metadata_json(&CKB);
+    let config_dir = tempfile::tempdir().expect("temporary guard config should be creatable");
+    let config = config_dir.path().join("depgate.toml");
+    fs::write(
+        &config,
+        "schema = 1\n\n[manifest]\nversions-in-root = false\n\n[rules.ckb-util]\n\
+         features = \"none\"\ndeny = [\"libc\"]\n",
+    )
+    .expect("guard config should be writable");
+
+    let output = metadata_check(&metadata, &config, Some(&CKB.fixture_root()), &[]);
+
+    assert_eq!(output.status.code(), Some(2), "the guard is a configuration error: {output:?}");
+    let stderr = cleaned_stderr(&output);
+    assert!(
+        stderr.contains(
+            "feature-aware rules need a graph resolved with all features; member ckb-util has 1 \
+             unactivated feature(s) — re-run with --all-features"
+        ),
+        "the guard names the member it rejected on and how to fix it: {stderr}"
+    );
+}
+
+#[test]
+fn a_feature_aware_deny_narrows_the_closure_end_to_end() {
+    // The whole chain on one workspace: `[graph].features = "all"` satisfies the guard, and
+    // `features = "none"` then answers `deny` on the closure a default build compiles.
+    let fixture = repository_root().join("tests/fixtures/ws-optfeature");
+    let config_dir = tempfile::tempdir().expect("temporary feature config should be creatable");
+    let policy = |selection: &str| {
+        format!(
+            "schema = 1\n\n[graph]\nfeatures = \"all\"\n\n[manifest]\nversions-in-root = false\n\n\
+             [rules.app]\nfeatures = {selection}\ndeny = [\"reqwest-like\"]\n"
+        )
+    };
+
+    let narrowed = config_dir.path().join("narrowed.toml");
+    fs::write(&narrowed, policy("\"none\"")).expect("narrowed config should be writable");
+    let output = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &narrowed,
+        &["--format", "json"],
+        false,
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--no-default-features never enables `net`, so the edge is not compiled: {output:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("narrowed report should be JSON");
+    assert_eq!(report["counters"]["violations"].as_u64(), Some(0));
+    assert_eq!(
+        report["features"],
+        serde_json::json!("all"),
+        "the document is still the all-features resolve the guard demands"
+    );
+
+    let human = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &narrowed,
+        &["--format", "human"],
+        false,
+    );
+    assert_eq!(
+        cleaned_stdout(&human).lines().next(),
+        Some("ok rules.app.deny (features = \"none\", 1 pruned)"),
+        "a rule that passes by narrowing says so: {human:?}"
+    );
+
+    let selected = config_dir.path().join("selected.toml");
+    fs::write(&selected, policy("[\"net\"]")).expect("selected config should be writable");
+    let fired = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &selected,
+        &["--format", "json"],
+        false,
+    );
+    assert_eq!(
+        fired.status.code(),
+        Some(1),
+        "the same rule still fires when its selection activates the edge: {fired:?}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&fired.stdout).expect("selected report should be JSON");
+    let violation = &report["violations"][0];
+    assert_eq!(violation["rule_id"], "rules.app.deny");
+    assert_eq!(violation["matches"][0]["name"], "reqwest-like");
+    assert_eq!(violation["features"], serde_json::json!(["net"]));
+    assert_eq!(violation["activation_pruned"], serde_json::json!([]));
+
+    let fired_human = check_with_manifest_and_config(
+        Some(&fixture.join("Cargo.toml")),
+        &selected,
+        &["--format", "human"],
+        false,
+    );
+    let rendered = cleaned_stdout(&fired_human);
+    assert!(
+        rendered.contains("1 match(es) (features = [\"net\"], 0 pruned)"),
+        "a rule that fails on a narrowed closure says which closure it was answered on, exactly \
+         as the passing form does: {rendered}"
+    );
+}
+
+#[test]
+fn a_unified_rule_carries_no_feature_fields_in_its_json_record() {
+    // AC 1 in the report shape: the keys a feature-aware rule adds stay absent everywhere else.
+    let output =
+        fixture_check_with_options(&violations_fixture_root(), &["--format", "json"], false);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("violations report should be JSON");
+
+    for violation in report["violations"].as_array().expect("report should carry violations") {
+        assert!(violation.get("features").is_none(), "unified rules add no features key");
+        assert!(violation.get("activation_pruned").is_none(), "and no pruning key");
+    }
+
+    // And the array those keys otherwise live in is not written at all: a policy with no
+    // feature-aware rule produces the report it produced before `rules[]` existed. The
+    // committed `ws_violations_json_report_snapshot` is the byte-level form of this claim;
+    // the assertion here names it so the reason the key is missing is not left to a diff.
+    assert!(
+        report.get("rules").is_none(),
+        "a unified-only policy writes no rules[] array: {report}"
     );
 }

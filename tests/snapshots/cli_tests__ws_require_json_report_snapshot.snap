@@ -1,0 +1,50 @@
+---
+source: tests/cli_tests.rs
+expression: cleaned_stdout(&output)
+---
+{
+  "tool": "cargo-depgate",
+  "version": "0.1.0",
+  "features": "default",
+  "timings": {
+    "read": "<MS>",
+    "parse": "<MS>",
+    "graph": "<MS>",
+    "traversals": "<MS>",
+    "evaluate": "<MS>",
+    "manifest": "<MS>",
+    "report": "<MS>",
+    "total": "<MS>"
+  },
+  "counters": {
+    "packages": 3,
+    "members": 3,
+    "normal_edges": 2,
+    "names": 3,
+    "superset_extra_edges": 0,
+    "direct_optional_decls": 0,
+    "unrebased_path_deps": 0,
+    "rules": 2,
+    "violations": 1,
+    "matches": 0
+  },
+  "violations": [
+    {
+      "rule_id": "rules.core.require",
+      "package": "core",
+      "kind": "require",
+      "matches": [],
+      "extra": [],
+      "missing": [
+        "app",
+        "no-such-*"
+      ],
+      "sealed_by": [],
+      "span": {
+        "file": "depgate.toml",
+        "line": 10,
+        "col": 11
+      }
+    }
+  ]
+}

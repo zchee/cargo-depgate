@@ -2,3 +2,7 @@ schema = 1
 
 [graph]
 features = ["workspace-app/metrics"]
+
+[rules."workspace-app"]
+features = ["metrics"]
+deny = ["openssl"]

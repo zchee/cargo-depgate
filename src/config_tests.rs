@@ -76,6 +76,37 @@ fn synthetic_graph() -> Graph<'static> {
     Graph::build(meta(json)).expect("synthetic graph builds")
 }
 
+/// The same workspace with a feature table on `app`, and `activated` as the features the
+/// resolve recorded for it — the difference between an all-features document and any other.
+fn featured_graph(activated: &str) -> Graph<'static> {
+    let json = format!(
+        r#"{{
+      "packages": [
+        {{"name":"app","version":"1.0.0","id":"path+file:///ws/app#1.0.0","source":null,
+         "manifest_path":"/ws/app/Cargo.toml",
+         "dependencies":[{{"name":"dep","kind":null,"optional":true}}],
+         "features":{{"net":["dep:dep"]}}}},
+        {{"name":"dep","version":"1.0.0","id":"registry+https://example.invalid/index#dep@1.0.0",
+         "source":"registry+https://example.invalid/index",
+         "manifest_path":"/cargo/registry/dep-1.0.0/Cargo.toml","dependencies":[]}}
+      ],
+      "workspace_members": ["path+file:///ws/app#1.0.0"],
+      "workspace_root":"/ws",
+      "resolve": {{
+        "nodes": [
+          {{"id":"path+file:///ws/app#1.0.0","features":[{activated}],"deps":[
+            {{"name":"dep","pkg":"registry+https://example.invalid/index#dep@1.0.0",
+             "dep_kinds":[{{"kind":null,"target":null}}]}}
+          ]}},
+          {{"id":"registry+https://example.invalid/index#dep@1.0.0","deps":[]}}
+        ],
+        "root":null
+      }}
+    }}"#
+    );
+    Graph::build(meta(Box::leak(json.into_boxed_str()))).expect("synthetic graph builds")
+}
+
 fn raw_config(text: &str) -> RawConfig {
     toml::from_str(text).expect("configuration parses")
 }
@@ -189,6 +220,7 @@ fn rules_follow_toml_declaration_order_within_a_package() {
         .filter(|rule| rule.package == "app")
         .map(|rule| match &rule.kind {
             RuleKind::Deny { .. } => "deny",
+            RuleKind::Require(_) => "require",
             RuleKind::Internal(_) => "internal",
             RuleKind::Leaf => "leaf",
             RuleKind::Direct(_) => "direct",
@@ -349,6 +381,248 @@ sealed = true
         validated.config.rules.iter().map(|rule| rule.package.as_str()).collect();
 
     assert_eq!(packages, ["zeta", "alpha", "middle"]);
+}
+
+#[test]
+fn require_splits_exact_and_glob_entries_and_keeps_declaration_order() {
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+require = ["dep", "rat*", "other"]
+"#,
+    );
+    let config = validate(&raw, None).expect("require validates").config;
+    let RuleKind::Require(patterns) = &config.rules[0].kind else {
+        panic!("the rule should be a require rule: {:?}", config.rules[0].kind);
+    };
+
+    assert_eq!(config.rules[0].id, "rules.app.require");
+    assert_eq!(
+        patterns.iter().map(RequirePattern::as_str).collect::<Vec<_>>(),
+        ["dep", "rat*", "other"],
+        "a failure reports the patterns as written, so declaration order is preserved"
+    );
+    assert!(matches!(patterns[0], RequirePattern::Exact(_)));
+    assert!(matches!(patterns[1], RequirePattern::Glob(_)));
+    assert!(matches!(patterns[2], RequirePattern::Exact(_)));
+    assert!(patterns[0].is_match("dep") && !patterns[0].is_match("dep-core"));
+    assert!(patterns[1].is_match("ratatui") && !patterns[1].is_match("tui"));
+}
+
+#[test]
+fn require_reports_an_unterminated_glob_at_its_array_entry() {
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+require = ["ok", "a[b"]
+"#,
+    );
+    let error = validate(&raw, None).expect_err("an unterminated require glob must fail");
+
+    assert_eq!(error.message, "error parsing glob 'a[b': unclosed character class; missing ']'");
+}
+
+#[test]
+fn require_names_that_no_package_carries_are_not_a_configuration_error() {
+    // `require` takes patterns, so an absent name is the rule failing, not the file being
+    // invalid: only the exact-set kinds (`internal`, `direct`) reject unknown names here.
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+require = ["totally-unknown-name"]
+"#,
+    );
+    let graph = synthetic_graph();
+
+    let validated = validate(&raw, Some(&graph)).expect("require reaches graph validation");
+
+    assert_eq!(validated.config.rules.len(), 1);
+    assert!(validated.warnings.is_empty(), "require has no per-run diagnostic");
+}
+
+#[test]
+fn empty_require_and_deny_lists_are_accepted_rules_not_errors() {
+    let raw = raw_config(
+        r"schema = 1
+
+[rules.app]
+require = []
+deny = []
+",
+    );
+
+    let validated = validate(&raw, None).expect("empty lists are a valid policy");
+
+    assert_eq!(
+        validated.config.rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+        ["rules.app.require", "rules.app.deny"],
+        "both keys still produce a rule, which then passes vacuously"
+    );
+    assert!(validated.warnings.is_empty());
+}
+
+#[test]
+fn require_and_deny_are_ordered_by_their_declaration_within_a_package() {
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+require = ["dep"]
+deny = ["other"]
+"#,
+    );
+    let validated = validate(&raw, None).expect("mixed rule kinds validate");
+
+    assert_eq!(
+        validated.config.rules.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(),
+        ["rules.app.require", "rules.app.deny"]
+    );
+}
+
+#[test]
+fn rule_features_accepts_every_named_selection_and_a_feature_list() {
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.unified]
+features = "unified"
+deny = ["a"]
+
+[rules.none]
+features = "none"
+deny = ["a"]
+
+[rules.plain]
+features = "default"
+deny = ["a"]
+
+[rules.every]
+features = "all"
+deny = ["a"]
+
+[rules.listed]
+features = ["net", "default"]
+deny = ["a"]
+"#,
+    );
+
+    let validated = validate(&raw, None).expect("every documented selection validates");
+    let selections = validated
+        .config
+        .rules
+        .iter()
+        .map(|rule| rule.features.as_ref().map(|features| features.selection.clone()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        selections,
+        [
+            // `unified` is the absent key spelled out: the same closure, no walk.
+            None,
+            Some(Selection::None),
+            Some(Selection::Default),
+            Some(Selection::All),
+            Some(Selection::List(vec!["net".to_owned(), "default".to_owned()])),
+        ]
+    );
+}
+
+#[test]
+fn an_unknown_rule_features_value_is_rejected_at_the_key() {
+    let raw = load_fixture("bad-features.toml");
+    let error = validate(&raw, None).expect_err("an unknown selection must be rejected");
+
+    assert_eq!(
+        error.message,
+        "rules.app.features must be `unified`, `none`, `default`, `all`, or a list of feature \
+         names (got `everything`)"
+    );
+    // The value `"everything"` starts at line 4, column 12.
+    assert_span(error.span.as_ref(), "bad-features.toml", 4, 12);
+}
+
+#[test]
+fn rule_features_without_a_closure_rule_is_rejected() {
+    // The key narrows a closure; a table with no closure rule would silently ignore it, and a
+    // policy that believes it narrowed something it did not is the failure mode to avoid.
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+features = "none"
+sealed = true
+"#,
+    );
+
+    let error = validate(&raw, None).expect_err("a features key with nothing to narrow must fail");
+
+    assert_eq!(
+        error.message,
+        "rules.app.features narrows the closure deny, require, internal and leaf read; \
+         rules.app declares none of them"
+    );
+}
+
+#[test]
+fn a_rule_features_list_naming_an_undeclared_feature_is_rejected_in_phase_b() {
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+features = ["net", "nope"]
+deny = ["dep"]
+"#,
+    );
+    let graph = featured_graph(r#""net""#);
+
+    let error = validate(&raw, Some(&graph)).expect_err("an unknown feature must be rejected");
+
+    assert_eq!(error.message, "rules.app.features references unknown feature `nope`");
+}
+
+#[test]
+fn a_feature_aware_rule_is_rejected_on_a_document_that_left_features_off() {
+    // The soundness premise of every activation walk, checked against the document itself:
+    // without it a `deny` rule can pass because the edge was never resolved.
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+features = "none"
+deny = ["dep"]
+"#,
+    );
+
+    let error = validate(&raw, Some(&featured_graph("")))
+        .expect_err("a partly activated member must be rejected");
+
+    assert_eq!(
+        error.message,
+        "feature-aware rules need a graph resolved with all features; member app has 1 \
+         unactivated feature(s) — re-run with --all-features"
+    );
+
+    validate(&raw, Some(&featured_graph(r#""net""#)))
+        .expect("the same policy is accepted once every member carries its features");
+}
+
+#[test]
+fn a_unified_policy_never_pays_for_the_all_features_guard() {
+    // The guard reads every member's feature tables, so it must not run for a policy that
+    // opted into nothing — and it must not reject one either.
+    let raw = raw_config(
+        r#"schema = 1
+
+[rules.app]
+deny = ["dep"]
+"#,
+    );
+
+    validate(&raw, Some(&featured_graph("")))
+        .expect("a policy without a features key is unaffected by the document's selection");
 }
 
 /// `Span` is `#[non_exhaustive]`, so a downstream reporter rendering its own configuration

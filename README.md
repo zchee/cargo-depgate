@@ -11,12 +11,13 @@ A high-performance dependency policy enforcer and CI gatekeeper for Cargo worksp
 * **Deterministic Fail-Fast CI**: Emits structured diagnostics with precise exit codes tailored for GitHub Actions and automated workflows.
 * **Zero Compilation Overhead**: Evaluates the resolved `cargo metadata` graph directly without compiling source code.
 
-Concretely: the gate's own work after `cargo metadata` returns is ~4 ms on a 700-package workspace,
-so its cost is dominated by the single resolve it already needs. Replacing the four `cargo tree`
-invocations of lemmy's dependency-policy step — two of which the gate expresses directly — with one
-gate run measures 3.1x end to end (298.7 ms against 931.2 ms on `aarch64-apple-darwin`; the absolute
-numbers move with the host, the ratio holds), and the ceiling scales with how many invocations a
-policy replaces.
+Concretely: on lemmy's 833-package workspace the gate's own work after `cargo metadata` returns is
+5 ms for plain reachability rules, or 14 ms for the feature-aware policy this repository ships for
+that example, against the ~265 ms the resolve itself costs — so the gate's cost is dominated by the
+single resolve it already needs. Replacing the four `cargo tree` invocations of lemmy's
+dependency-policy step — all four of which the gate expresses — with one gate run measures 3.3x end
+to end (271.8 ms against 906.2 ms on `aarch64-apple-darwin`; the absolute numbers move with the
+host, the ratio holds), and the ceiling scales with how many invocations a policy replaces.
 
 ## Install and run
 
@@ -100,7 +101,11 @@ internal = ["acme-core", "acme-store"]
 direct = ["acme-core", "serde", "tokio"]
 
 [rules.acme-core]
+# Answer this table's rules on the closure `acme-core` compiles with no features, instead of
+# on the workspace-unified resolve. Only on an all-features document; see below.
+features = "none"
 internal = ["acme-store"]
+require = ["serde"]
 
 [rules.acme-store]
 leaf = true
@@ -116,7 +121,9 @@ sealed = true
 | `[internal].members` | boolean | `true` | Treat every workspace member as an internal package. |
 | `[internal].patterns` | list of name globs | `[]` | Extra names counted as internal, e.g. `["acme-*"]`. Together with `members` this is the single definition of "internal", and it is used for membership matching only: the `internal` and `leaf` rules ask of each reached name whether it is in that set. Nothing else reads it — witness paths render identically whether or not a hop is internal. |
 | `[manifest].versions-in-root` | boolean | `true` | Enable the manifest rule described below. |
+| `[rules.<package>].features` | `"unified"`, `"none"`, `"default"`, `"all"`, or a list of the package's own features | `"unified"` | Which closure this package's `deny`, `require`, `internal` and `leaf` rules read. `"unified"` is the workspace-wide resolve every rule reads by default. Any other value evaluates them on the closure a build of that package under that selection compiles, derived from the same resolve — see *Package-rooted feature selection* below. `direct` and `sealed` read no closure and are unaffected, so a table that declares only those is rejected rather than silently ignoring the key. |
 | `[rules.<package>].deny` | list of names or globs | unset | Names that must not appear anywhere in the package's closure. The rule's own package name never matches, so a family glob such as `deny = ["acme-*"]` on `rules.acme-app` does not report `acme-app` itself: a self-match is not a dependency finding. |
+| `[rules.<package>].require` | list of names or globs | unset | The dual of `deny`, read on the same closure: every pattern must match at least one name in it, and a failure lists only the patterns that matched nothing. The rule's own package name never satisfies a pattern, so `require` always asks for a dependency. |
 | `[rules.<package>].internal` | list of exact names | unset | The exact set of internal names the closure may contain. The rule's own package name is skipped here too, so it is neither required in the set nor reported as `+extra`. |
 | `[rules.<package>].leaf` | boolean | unset | The closure must contain no internal name at all. Sugar for `internal = []`, and mutually exclusive with it. |
 | `[rules.<package>].direct` | list of exact names | unset | The exact set of resolved depth-one normal dependencies. |
@@ -130,10 +137,37 @@ JSON Schema for editor completion.
 Validation happens in two groups. The graph-independent group covers TOML syntax, the `schema`
 value, unknown keys, the empty-policy case, `leaf` together with `internal`, a package listing
 itself in its own `internal` set, a `[graph].features` value that is neither `default`, `all` nor a
-feature list, and glob compilation. The graph-dependent group additionally
+feature list, a `[rules.<package>].features` value outside the five it accepts, and glob
+compilation. The graph-dependent group additionally
 requires that every `[rules.<package>]` key names a workspace member and that every `internal` and
 `direct` entry names a package present in the resolved graph — these are exact sets, so globs are
-not accepted there. Both groups exit 2 and point at the offending line and column in `depgate.toml`.
+not accepted there. It also rejects a `features` list naming a feature the package does not
+declare, and any feature-aware rule at all on a document that was not resolved with every
+member's features (see below). Both groups exit 2 and point at the offending line and column in
+`depgate.toml`.
+
+### Package-rooted feature selection
+
+`cargo metadata` resolves features **once for the whole workspace**: the union over every member,
+every dependency kind and every platform. A `[rules.<package>].features` value other than
+`"unified"` re-runs Cargo's feature resolution from that one package over the same document, and
+the rule is then answered on the edges that activation enables — the question
+`cargo tree -p <package> --no-default-features -i <name>` asks, without a second resolve and
+without compiling anything.
+
+That narrowing is sound only when every edge the activation could enable is in the document, which
+holds exactly when every workspace member was resolved with all of its own features. That is
+checked against the document itself: a feature-aware rule on any other document is exit 2 naming
+the first member that proves it, because a `deny` rule passing for want of an edge is a false pass.
+Resolve with `--all-features` (or `[graph].features = "all"`) to satisfy it.
+
+The two divergences from `cargo tree` that remain are the ones the gap table already records: the
+closure keeps every platform's edges, and it is rooted at the package rather than at a build, so
+the root's own dev-dependencies — which a bare `cargo tree -p P` includes — stay out. A rule that
+narrows reports the selection it used and how many names it removed on its human-report line,
+whether it passed or failed; the names themselves are in the JSON report, as `features` and
+`activation_pruned` on that rule's record in the `rules[]` array — which is written whenever the
+policy carries at least one feature-aware rule, and is absent from every report where none does.
 
 ### The graph the rules see
 
@@ -154,20 +188,22 @@ This is a **superset** of what `cargo tree -p <member> -e normal` shows on one h
 the gap table below measures. The direction matters per rule kind: `deny`, `leaf` and `sealed` ask
 a containment question, so a wider graph can only add findings and never hide one. `internal` and
 `direct` ask an equality question, so a wider graph can report a `+extra` name that a host-rooted,
-package-rooted view would not have shown.
+package-rooted view would not have shown. `require` asks a presence question, which points the
+other way: a wider graph can only satisfy more patterns, never fewer.
 
 ### Rule kinds
 
 | Rule id | Question | Failure direction |
 |---|---|---|
 | `rules.<pkg>.deny` | Does the closure of `<pkg>` contain a name matching any pattern? | containment — widening only adds findings |
+| `rules.<pkg>.require` | Does the closure of `<pkg>` contain a name matching every pattern? | presence — widening can only satisfy more patterns |
 | `rules.<pkg>.internal` | Are the internal names in the closure exactly the declared set? | equality — widening can add `+extra` |
 | `rules.<pkg>.leaf` | Does the closure contain no internal name? | containment |
 | `rules.<pkg>.direct` | Are the resolved depth-one normal dependencies exactly the declared set? | equality on depth-one edges |
 | `rules.<pkg>.sealed` | Is `<pkg>` absent from the closure of every other workspace member? | containment |
 | `manifest.versions-in-root` | Does any member manifest name a dependency version? | not graph-based |
 
-A `deny` entry is an exact name unless it contains `*`, `?` or `[`, in which case it is a glob.
+A `deny` or `require` entry is an exact name unless it contains `*`, `?` or `[`, in which case it is a glob.
 Matching is case-sensitive and `-`/`_` are never normalised, so `deny = ["axum"]` does not match
 `axum-core`; write `axum*` when the ban is meant to cover a family.
 
@@ -258,6 +294,15 @@ carries every matching name it reached, an `internal` or `direct` violation carr
 `members`, `normal_edges`, `names`, `superset_extra_edges`, `direct_optional_decls`,
 `unrebased_path_deps`, `rules`, `violations` and `matches`.
 
+A policy that carries at least one feature-aware rule adds one more top-level key between
+`counters` and `violations`: a `rules[]` array with one `{id, kind, passed}` record per rule, in
+evaluation order, each rule that narrowed also carrying `features` and `activation_pruned`. It
+exists because `violations[]` is otherwise the only per-rule surface, and a rule that *passes* by
+narrowing emits no violation — so without it the names its selection removed are reported nowhere.
+The array is written only for such a policy: a report from a policy whose rules all read the
+workspace-unified closure has no `rules[]` key at all and is byte-for-byte what it was before the
+key existed.
+
 `features` is the selection the graph was **actually** resolved with, not the file's
 `[graph].features`: `"all"` for `--all-features` (or `features = "all"`), the array of specs for
 `--features`, `"default"` otherwise. Under `--metadata-json` it is `null` — no Cargo ran, so the
@@ -302,25 +347,45 @@ split on the tab.
 shows one member on one host with that member's own features. The difference is measured, not
 assumed: `counters.superset_extra_edges` reports how many of the edges a run actually traversed are
 platform-conditional (every normal `dep_kinds` entry carries a non-null `target`) or leave a
-workspace member through a declaration marked `optional = true`.
+workspace member through a declaration marked `optional = true`. A feature-aware rule contributes
+to it too, because measuring what its selection pruned means walking the unified closure as well as
+the narrowed one — so a policy whose rules *all* narrow can still report extra edges, and lemmy's
+400 below is that case rather than a widening any of its three rules was answered on.
 
 | example | packages / members | `superset_extra_edges` |
 |---|---:|---:|
-| [LemmyNet/lemmy@439734d](https://github.com/LemmyNet/lemmy/tree/439734d) | 707 / 41 | 311 |
+| [LemmyNet/lemmy@439734d](https://github.com/LemmyNet/lemmy/tree/439734d) | 833 / 41 | 400 |
 | [nervosnetwork/ckb@17d7db5](https://github.com/nervosnetwork/ckb/tree/17d7db5) | 714 / 75 | 0 |
-| [uutils/coreutils@6341084](https://github.com/uutils/coreutils/tree/6341084) | 498 / 114 | 329 |
+| [uutils/coreutils@6341084](https://github.com/uutils/coreutils/tree/6341084) | 512 / 114 | 358 |
 
 Measured on host **`aarch64-apple-darwin`** (rustc 1.98.0, cargo 1.98.0) against the frozen fixtures
-in `tests/fixtures/`. ckb's 0 is a property of its policy rather than of its graph: the counter
-counts edges a run walked, and a manifest-only policy declares no graph rule, so it walks none.
+in `tests/fixtures/`. The lemmy and coreutils documents are resolved with `--all-features`, which
+their feature-aware rules require, so they carry more packages than a default resolve would. ckb's 0
+is a property of its policy rather than of its graph: the counter counts edges a run walked, and a
+manifest-only policy declares no graph rule, so it walks none.
 
 The extras come from two families and no others: platform-conditional edges, such as the
 `windows-sys` and `wasm-bindgen` families, and optional dependencies that a sibling member unified
 on. Both only ever *widen* the closure. Widening is safe for the containment rules — `deny`, `leaf`
 and `sealed` cannot lose a finding to it — and it is the measured risk for the equality rules
 `internal` and `direct`, which can report an `+extra` name that a host-rooted, package-rooted view
-would not have shown. [`docs/examples.md`](docs/examples.md) works three real policies through end
-to end, including the coreutils case where this widening is the whole story.
+would not have shown, and for `require`, which a widened closure can satisfy on an edge the build
+never compiles.
+
+A rule can also decline the widening. `[rules.<package>].features` re-runs Cargo's feature
+resolution from that package over the same document and answers the rule on the edges that
+activation enables, which is how the two upstream lines that ask about a named feature set — lemmy's
+`cargo tree -p lemmy_api_common --no-default-features -i diesel` and coreutils' `--features
+feat_os_unix` step — are expressed at all. Two divergences from `cargo tree` survive it, and they
+are why the result is still a superset: every platform's edges are kept, and the closure is rooted
+at the package rather than at a build, so the root's own dev-dependencies, which a bare
+`cargo tree -p P` includes, stay out. What the narrowing removed is reported per rule rather than
+counted per run — the human report gives the number on the rule's own line, and the JSON report's
+`rules[]` array lists the names as `activation_pruned` — so a pass by narrowing never reads as a
+workspace-wide claim.
+[`docs/examples.md`](docs/examples.md) works three real policies through end to end, including the
+coreutils case where the same rule fires on the unified closure and passes on the package-rooted
+one.
 
 <!-- depgate:exit-codes -->
 
@@ -395,16 +460,16 @@ overflow from the annotation list. The human report printed below the annotation
 truncated: it always carries every violation, so the annotations are a navigation aid and the report
 is the record.
 
-[`docs/examples.md`](docs/examples.md) migrates three real projects' CI policies this way — two of
-lemmy's four `cargo tree` assertions among them — each with the upstream lines it replaces quoted
+[`docs/examples.md`](docs/examples.md) migrates three real projects' CI policies this way — all
+four of lemmy's `cargo tree` assertions among them — each with the upstream lines it replaces quoted
 next to the rule, so a reviewer can tell a deliberate policy change from an accidental one.
 
 <!-- depgate:version-blind -->
 
 ## Version-blind policies
 
-Rules operate on package **names**, not on `(name, version)` pairs. In the lemmy fixture, 707
-resolved packages project onto 603 distinct names, and 70 of those names are resolved at two or more
+Rules operate on package **names**, not on `(name, version)` pairs. In the lemmy fixture, 833
+resolved packages project onto 704 distinct names, and 83 of those names are resolved at two or more
 versions at once. The consequences are worth stating plainly:
 
 * `deny = ["syn"]` denies every resolved version of `syn`.

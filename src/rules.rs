@@ -5,8 +5,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use fixedbitset::FixedBitSet;
+
 use crate::{
-    config::{Config, Rule, RuleKind, Span},
+    config::{Config, RequirePattern, Rule, RuleKind, Span},
+    features::{self, Selection},
     graph::{Graph, Reach, Scratch},
 };
 
@@ -17,6 +20,11 @@ use crate::{
 /// successfully and the configuration to have passed graph-dependent validation.
 /// If a caller violates that contract by naming a package that is not a member,
 /// the affected rules fail closed with an empty internal-invariant violation.
+///
+/// A rule carrying a `features` selection is evaluated on its own package-rooted closure
+/// instead, which costs one activation walk and one masked traversal per rule and one extra
+/// unified traversal per group (the superset the pruned names are measured against). Nothing
+/// on that path runs for a policy without such a rule, down to the walk's allocation.
 #[must_use]
 pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Evaluation {
     scratch.reset_extra();
@@ -24,20 +32,10 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
 
     let internal_mask = internal_mask(graph, config);
     let groups = group_rules(config);
-    let mut statuses: Vec<RuleStatus> = config
-        .rules
-        .iter()
-        .map(|rule| RuleStatus {
-            id: rule.id.clone(),
-            package: Some(rule.package.clone()),
-            kind: kind_name(&rule.kind),
-            passed: false,
-            matched: 0,
-        })
-        .collect();
-    let mut violation_slots: Vec<Option<Violation>> =
-        (0..config.rules.len()).map(|_| None).collect();
-    let mut matches = 0_u32;
+    let mut results = Results::new(config);
+    // Allocated on first use so a policy with no feature-aware rule pays nothing, and shared
+    // by every rule that does: the walk's per-package decode caches are the expensive part.
+    let mut walk = None;
     let mut member_nodes = HashMap::with_capacity(graph.members().len());
     for &node in graph.members() {
         member_nodes.entry(graph.name(node)).or_insert(node);
@@ -53,55 +51,20 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
             // Phase B validation guarantees this lookup. Keep evaluation fail-closed
             // for direct callers that construct Config values by hand.
             for &index in &indices {
-                let result = invariant_failure(&config.rules[index]);
-                record_result(index, result, &mut statuses, &mut violation_slots, &mut matches);
+                results.record(index, invariant_failure(&config.rules[index]));
             }
             continue;
         };
 
         for &index in &indices {
             if let RuleKind::Direct(expected) = &config.rules[index].kind {
-                let result = evaluate_direct(&config.rules[index], graph, root, expected);
-                record_result(index, result, &mut statuses, &mut violation_slots, &mut matches);
+                results.record(index, evaluate_direct(&config.rules[index], graph, root, expected));
             }
         }
 
-        let needs_forward = indices.iter().any(|&index| {
-            matches!(
-                config.rules[index].kind,
-                RuleKind::Deny { .. } | RuleKind::Internal(_) | RuleKind::Leaf
-            )
-        });
-        if needs_forward {
-            let started = Instant::now();
-            let reach = graph.reach(root, scratch);
-            traversal_time += started.elapsed();
-            for &index in &indices {
-                let result = match &config.rules[index].kind {
-                    RuleKind::Deny { exact, globs, .. } => {
-                        evaluate_deny(&config.rules[index], graph, &reach, root, exact, globs)
-                    }
-                    RuleKind::Internal(expected) => evaluate_internal(
-                        &config.rules[index],
-                        graph,
-                        &reach,
-                        root,
-                        &internal_mask,
-                        expected,
-                    ),
-                    RuleKind::Leaf => evaluate_internal(
-                        &config.rules[index],
-                        graph,
-                        &reach,
-                        root,
-                        &internal_mask,
-                        &BTreeSet::new(),
-                    ),
-                    RuleKind::Direct(_) | RuleKind::Sealed => continue,
-                };
-                record_result(index, result, &mut statuses, &mut violation_slots, &mut matches);
-            }
-        }
+        let group = Group { config, indices: &indices, root, internal_mask: &internal_mask };
+        traversal_time += evaluate_closure_rules(graph, &group, scratch, &mut results);
+        traversal_time += evaluate_feature_rules(graph, &group, scratch, &mut walk, &mut results);
 
         let needs_reverse =
             indices.iter().any(|&index| matches!(config.rules[index].kind, RuleKind::Sealed));
@@ -112,20 +75,144 @@ pub fn evaluate(graph: &Graph<'_>, config: &Config, scratch: &mut Scratch) -> Ev
             for &index in &indices {
                 if matches!(config.rules[index].kind, RuleKind::Sealed) {
                     let result = evaluate_sealed(&config.rules[index], graph, &reverse);
-                    record_result(index, result, &mut statuses, &mut violation_slots, &mut matches);
+                    results.record(index, result);
                 }
             }
         }
     }
 
-    let violations = violation_slots.into_iter().flatten().collect();
     Evaluation {
-        statuses,
-        violations,
-        matches,
+        statuses: results.statuses,
+        violations: results.violations.into_iter().flatten().collect(),
+        matches: results.matches,
         superset_extra_edges: scratch.superset_extra_edges(),
         traversal_time,
     }
+}
+
+/// Evaluates every rule of one group that reads the root's **unified** forward closure,
+/// running the single BFS they share, and returns the time spent inside that traversal.
+///
+/// `deny`, `require`, `internal` and `leaf` all ask a question about the same reach, so
+/// they are answered together; `direct` and `sealed` never enter here, and neither does a
+/// rule that selected a feature-aware closure of its own.
+fn evaluate_closure_rules(
+    graph: &Graph<'_>,
+    group: &Group<'_>,
+    scratch: &mut Scratch,
+    results: &mut Results,
+) -> Duration {
+    let unified = |&index: &usize| {
+        let rule = group.rule(index);
+        rule.features.is_none() && rule.kind.reads_closure()
+    };
+    if !group.indices.iter().any(unified) {
+        return Duration::ZERO;
+    }
+
+    let started = Instant::now();
+    let reach = graph.reach(group.root, scratch);
+    let traversal_time = started.elapsed();
+    for &index in group.indices.iter().filter(|index| unified(index)) {
+        if let Some(result) = evaluate_closure_rule(group.rule(index), graph, &reach, group) {
+            results.record(index, result);
+        }
+    }
+    traversal_time
+}
+
+/// Evaluates every rule of one group that carries a `features` selection, and returns the
+/// time spent inside the traversals that took.
+///
+/// Each such rule gets its own activation walk, because each may select different features,
+/// and its own BFS over the edges that activation enables. The unified closure is traversed
+/// once more for the whole group — it is the same for every rule rooted here — so that each
+/// rule can report the names its selection removed from it.
+///
+/// A walk that cannot decode a package fails the rule closed rather than answering from a
+/// closure that was never computed: the alternative is a rule that passes because its
+/// evidence is missing, which is the failure this whole path exists to prevent.
+fn evaluate_feature_rules<'g, 'm>(
+    graph: &'g Graph<'m>,
+    group: &Group<'_>,
+    scratch: &mut Scratch,
+    walk: &mut Option<features::Walk<'g, 'm>>,
+    results: &mut Results,
+) -> Duration {
+    let mut traversal_time = Duration::ZERO;
+    let mut superset: Option<FixedBitSet> = None;
+    for &index in group.indices {
+        let rule = group.rule(index);
+        let Some(selection) = rule.features.as_ref().map(|features| &features.selection) else {
+            continue;
+        };
+        if !rule.kind.reads_closure() {
+            continue;
+        }
+
+        // The walk is traversal work: `--timings` folds it into `traversals` with the two
+        // BFS runs it feeds, rather than growing the pinned phase list by a label.
+        let started = Instant::now();
+        let walk = walk.get_or_insert_with(|| features::Walk::new(graph));
+        let activated = walk.activate(group.root, selection);
+        let Ok(activation) = activated else {
+            traversal_time += started.elapsed();
+            results.record(index, invariant_failure(rule));
+            continue;
+        };
+
+        let superset =
+            superset.get_or_insert_with(|| graph.reach(group.root, scratch).names().clone());
+        let reach = graph.reach_activated(group.root, activation.edges(), scratch);
+        traversal_time += started.elapsed();
+
+        let pruned = pruned_names(graph, superset, &reach);
+        let Some(mut result) = evaluate_closure_rule(rule, graph, &reach, group) else {
+            continue;
+        };
+        results.statuses[index].activation_pruned.clone_from(&pruned);
+        if let Some(violation) = result.violation.as_mut() {
+            violation.activation_pruned = pruned;
+        }
+        results.record(index, result);
+    }
+    traversal_time
+}
+
+/// Answers one closure rule against `reach`, whichever closure that reach is; `None` for a
+/// kind that does not read one.
+fn evaluate_closure_rule(
+    rule: &Rule,
+    graph: &Graph<'_>,
+    reach: &Reach<'_, '_>,
+    group: &Group<'_>,
+) -> Option<RuleResult> {
+    let root = group.root;
+    Some(match &rule.kind {
+        RuleKind::Deny { exact, globs, .. } => {
+            evaluate_deny(rule, graph, reach, root, exact, globs)
+        }
+        RuleKind::Require(patterns) => evaluate_require(rule, graph, reach, root, patterns),
+        RuleKind::Internal(expected) => {
+            evaluate_internal(rule, graph, reach, root, group.internal_mask, expected)
+        }
+        RuleKind::Leaf => {
+            evaluate_internal(rule, graph, reach, root, group.internal_mask, &BTreeSet::new())
+        }
+        RuleKind::Direct(_) | RuleKind::Sealed => return None,
+    })
+}
+
+/// The names the unified closure `superset` carries that the activated `reach` does not,
+/// alphabetically — the evidence that a feature-aware rule narrowed anything at all.
+fn pruned_names(graph: &Graph<'_>, superset: &FixedBitSet, reach: &Reach<'_, '_>) -> Vec<String> {
+    let mut pruned = superset
+        .difference(reach.names())
+        .filter_map(|name_index| u32::try_from(name_index).ok())
+        .map(|name_id| graph.name_str(name_id).to_owned())
+        .collect::<Vec<_>>();
+    pruned.sort_unstable();
+    pruned
 }
 
 /// The complete result of one rule evaluation pass.
@@ -136,7 +223,10 @@ pub struct Evaluation {
     pub statuses: Vec<RuleStatus>,
     /// The failed rules, in their relative configuration order.
     pub violations: Vec<Violation>,
-    /// The total number of deny, extra, and sealed entries.
+    /// The total number of deny, extra and sealed entries.
+    ///
+    /// `require` contributes nothing: its finding counts the patterns that matched
+    /// *nothing*, which is not the same quantity every other contributor reports.
     pub matches: u32,
     /// The union of cfg-only and member-optional edges traversed by all BFS runs.
     pub superset_extra_edges: u32,
@@ -154,12 +244,22 @@ pub struct RuleStatus {
     pub id: String,
     /// The workspace package targeted by the rule, or `None` for the manifest rule.
     pub package: Option<String>,
-    /// The rule kind (`deny`, `internal`, `leaf`, `direct`, or `sealed`).
+    /// The rule kind (`deny`, `require`, `internal`, `leaf`, `direct`, or `sealed`).
     pub kind: &'static str,
     /// Whether the rule passed.
     pub passed: bool,
-    /// The number of deny, extra, or sealed entries for this rule.
+    /// The number of deny, extra or sealed entries for this rule; always zero for a
+    /// `require` rule, whose count of unmatched patterns is `Violation::missing` instead.
     pub matched: u32,
+    /// The feature selection this rule's closure was narrowed to, or `None` when it read the
+    /// workspace-unified closure.
+    pub features: Option<Selection>,
+    /// Names in this rule's unified closure that its activation removed, alphabetically.
+    ///
+    /// Always empty for a `features`-less rule, which narrows nothing. This is the only place
+    /// the pruning is recorded: it is per-rule evidence, not a run-wide quantity, so no
+    /// counter reports it.
+    pub activation_pruned: Vec<String>,
 }
 
 /// One failed graph rule and its evidence.
@@ -170,18 +270,25 @@ pub struct Violation {
     pub rule_id: String,
     /// The workspace package targeted by the failed rule.
     pub package: String,
-    /// The rule kind (`deny`, `internal`, `leaf`, `direct`, or `sealed`).
+    /// The rule kind (`deny`, `require`, `internal`, `leaf`, `direct`, or `sealed`).
     pub kind: &'static str,
     /// Names matched by a deny rule.
     pub matches: Vec<Match>,
     /// Unexpected names found by an exact-set rule.
     pub extra: Vec<Match>,
-    /// Expected names absent from an exact-set rule's actual set.
+    /// Expected names absent from an exact-set rule's actual set, or the `require`
+    /// patterns that matched nothing in the rule's closure.
     pub missing: Vec<String>,
     /// Workspace members that consume a sealed package.
     pub sealed_by: Vec<SealedEntry>,
     /// The source span of the failed rule.
     pub span: Span,
+    /// The feature selection the failed rule's closure was narrowed to, or `None` when it read
+    /// the workspace-unified closure.
+    pub features: Option<Selection>,
+    /// Names in the rule's unified closure that its activation removed, alphabetically; empty
+    /// for a rule that narrows nothing. See [`RuleStatus::activation_pruned`].
+    pub activation_pruned: Vec<String>,
 }
 
 /// One matched or unexpected package name with its shortest witness.
@@ -231,6 +338,61 @@ struct RuleResult {
     violation: Option<Violation>,
 }
 
+/// The rules of one package and everything their evaluation shares: they are answered
+/// together because they are all rooted at the same node, whichever closure each reads.
+struct Group<'c> {
+    config: &'c Config,
+    /// Configuration positions of this package's rules, in declaration order.
+    indices: &'c [usize],
+    /// The workspace member every rule in the group is rooted at.
+    root: u32,
+    internal_mask: &'c BTreeSet<u32>,
+}
+
+impl Group<'_> {
+    fn rule(&self, index: usize) -> &Rule {
+        &self.config.rules[index]
+    }
+}
+
+/// The accumulating output of one evaluation pass: one status and one violation slot per
+/// configured rule, indexed by configuration position so results can be recorded in any
+/// order and still be reported in declaration order.
+struct Results {
+    statuses: Vec<RuleStatus>,
+    violations: Vec<Option<Violation>>,
+    matches: u32,
+}
+
+impl Results {
+    fn new(config: &Config) -> Self {
+        Self {
+            statuses: config
+                .rules
+                .iter()
+                .map(|rule| RuleStatus {
+                    id: rule.id.clone(),
+                    package: Some(rule.package.clone()),
+                    kind: kind_name(&rule.kind),
+                    passed: false,
+                    matched: 0,
+                    features: rule_selection(rule),
+                    activation_pruned: Vec::new(),
+                })
+                .collect(),
+            violations: (0..config.rules.len()).map(|_| None).collect(),
+            matches: 0,
+        }
+    }
+
+    fn record(&mut self, index: usize, result: RuleResult) {
+        self.statuses[index].passed = result.passed;
+        self.statuses[index].matched = result.matched;
+        self.matches = self.matches.saturating_add(result.matched);
+        self.violations[index] = result.violation;
+    }
+}
+
 fn group_rules(config: &Config) -> Vec<Vec<usize>> {
     let mut groups = Vec::new();
     let mut by_package = HashMap::<&str, usize>::new();
@@ -266,6 +428,7 @@ fn internal_mask(graph: &Graph<'_>, config: &Config) -> BTreeSet<u32> {
 fn kind_name(kind: &RuleKind) -> &'static str {
     match kind {
         RuleKind::Deny { .. } => "deny",
+        RuleKind::Require(_) => "require",
         RuleKind::Internal(_) => "internal",
         RuleKind::Leaf => "leaf",
         RuleKind::Direct(_) => "direct",
@@ -283,24 +446,22 @@ fn empty_violation(rule: &Rule) -> Violation {
         missing: Vec::new(),
         sealed_by: Vec::new(),
         span: rule.span.clone(),
+        features: rule_selection(rule),
+        activation_pruned: Vec::new(),
     }
+}
+
+/// The selection a rule's records report: the one its closure was narrowed to, and `None` for
+/// the kinds that read no closure, whose records must not claim a narrowing that did not apply.
+fn rule_selection(rule: &Rule) -> Option<Selection> {
+    rule.kind
+        .reads_closure()
+        .then(|| rule.features.as_ref().map(|features| features.selection.clone()))
+        .flatten()
 }
 
 fn invariant_failure(rule: &Rule) -> RuleResult {
     RuleResult { passed: false, matched: 0, violation: Some(empty_violation(rule)) }
-}
-
-fn record_result(
-    index: usize,
-    result: RuleResult,
-    statuses: &mut [RuleStatus],
-    violation_slots: &mut [Option<Violation>],
-    matches: &mut u32,
-) {
-    statuses[index].passed = result.passed;
-    statuses[index].matched = result.matched;
-    *matches = matches.saturating_add(result.matched);
-    violation_slots[index] = result.violation;
 }
 
 fn evaluate_deny(
@@ -336,6 +497,57 @@ fn evaluate_deny(
     let mut violation = empty_violation(rule);
     violation.matches = matches;
     RuleResult { passed: false, matched: match_count, violation: Some(violation) }
+}
+
+/// Evaluates a `require` rule: every pattern must match some name in the closure.
+///
+/// The verdict is taken per pattern rather than per reached name, so the violation can
+/// list exactly the patterns that matched nothing, in declaration order. An exact pattern
+/// resolves through the name table in `O(1)`; a glob scans the reached names and stops at
+/// its first match. Like `deny`, the root's own name is not a candidate.
+///
+/// The rule reports `matched: 0` however many patterns missed. Every other contributor to
+/// that counter reports names it *found*, and summing those with names *not* found would
+/// make the total mean nothing; the miss count reaches the reports through
+/// `Violation::missing`, which is what the human and GitHub labels already read.
+fn evaluate_require(
+    rule: &Rule,
+    graph: &Graph<'_>,
+    reach: &Reach<'_, '_>,
+    root: u32,
+    patterns: &[RequirePattern],
+) -> RuleResult {
+    let root_name = graph.name_id(root);
+    let missing = patterns
+        .iter()
+        .filter(|pattern| !is_required_name_reached(graph, reach, root_name, pattern))
+        .map(|pattern| pattern.as_str().to_owned())
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return passed_result();
+    }
+    let mut violation = empty_violation(rule);
+    violation.missing = missing;
+    RuleResult { passed: false, matched: 0, violation: Some(violation) }
+}
+
+fn is_required_name_reached(
+    graph: &Graph<'_>,
+    reach: &Reach<'_, '_>,
+    root_name: u32,
+    pattern: &RequirePattern,
+) -> bool {
+    match pattern {
+        RequirePattern::Exact(name) => graph
+            .lookup_name(name)
+            .is_some_and(|name_id| name_id != root_name && reach.contains_name(name_id)),
+        RequirePattern::Glob(_) => reach.names().ones().any(|name_index| {
+            u32::try_from(name_index).is_ok_and(|name_id| {
+                name_id != root_name && pattern.is_match(graph.name_str(name_id))
+            })
+        }),
+    }
 }
 
 fn evaluate_internal(

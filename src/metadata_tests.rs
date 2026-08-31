@@ -169,7 +169,7 @@ fn dep_kinds_fold_distinguishes_null_build_dev_and_multi_kind_edges() {
 fn dep_kinds_fold_treats_a_missing_kind_as_normal_and_ignores_unknown_keys() {
     let json = r#"[{"target":null,"extra":{"nested":[1,2]}},{"kind":"dev"}]"#;
     let raw: &RawValue = serde_json::from_str(json).expect("raw value");
-    let dep = Dep { pkg: Cow::Borrowed("x"), dep_kinds: Some(raw) };
+    let dep = Dep { pkg: Cow::Borrowed("x"), name: None, dep_kinds: Some(raw) };
 
     let fold = fold_dep_kinds(&dep).expect("fold");
 
@@ -178,11 +178,11 @@ fn dep_kinds_fold_treats_a_missing_kind_as_normal_and_ignores_unknown_keys() {
 
 #[test]
 fn dep_kinds_fold_reports_absent_and_malformed_arrays() {
-    let absent = Dep { pkg: Cow::Borrowed("x"), dep_kinds: None };
+    let absent = Dep { pkg: Cow::Borrowed("x"), name: None, dep_kinds: None };
     assert_eq!(fold_dep_kinds(&absent).expect("absent folds to zero").entries, 0);
 
     let raw: &RawValue = serde_json::from_str(r#"{"kind":null}"#).expect("raw value");
-    let not_an_array = Dep { pkg: Cow::Borrowed("x"), dep_kinds: Some(raw) };
+    let not_an_array = Dep { pkg: Cow::Borrowed("x"), name: None, dep_kinds: Some(raw) };
     assert!(fold_dep_kinds(&not_an_array).is_err(), "an object is not a dep_kinds array");
 }
 

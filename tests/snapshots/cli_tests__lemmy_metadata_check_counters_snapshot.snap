@@ -6,11 +6,11 @@ expression: counters
   "direct_optional_decls": 0,
   "matches": 0,
   "members": 41,
-  "names": 603,
-  "normal_edges": 2444,
-  "packages": 707,
-  "rules": 1,
-  "superset_extra_edges": 311,
+  "names": 704,
+  "normal_edges": 2950,
+  "packages": 833,
+  "rules": 3,
+  "superset_extra_edges": 400,
   "unrebased_path_deps": 0,
   "violations": 0
 }

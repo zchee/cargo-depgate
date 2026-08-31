@@ -39,6 +39,8 @@ fn status(id: &str, package: Option<&str>, kind: &'static str, passed: bool) -> 
         kind,
         passed,
         matched: u32::from(!passed),
+        features: None,
+        activation_pruned: Vec::new(),
     }
 }
 
@@ -52,6 +54,8 @@ fn violation(rule_id: &str, kind: &'static str, line: u32) -> Violation {
         missing: Vec::new(),
         sealed_by: Vec::new(),
         span: span("depgate.toml", line),
+        features: None,
+        activation_pruned: Vec::new(),
     }
 }
 

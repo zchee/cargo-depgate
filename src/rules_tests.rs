@@ -6,7 +6,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::*;
 use crate::{
-    config::{FeatureSelection, InternalDef},
+    config::{FeatureSelection, InternalDef, RuleFeatures},
     graph::Graph,
     metadata::{Meta, MetadataBuffer, parse},
 };
@@ -20,6 +20,10 @@ struct Spec {
     edges: Vec<(usize, usize, &'static str)>,
     members: Vec<usize>,
     decls: Vec<Decl>,
+    /// Per package, its `[features]` table. Every key is recorded as activated on the resolve
+    /// node too, which is the shape an `--all-features` document has — the only shape a
+    /// feature-aware rule may be evaluated on.
+    features: Vec<(usize, &'static str, Vec<&'static str>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +48,30 @@ impl Decl {
 }
 
 impl Spec {
+    /// The package's `[features]` table as JSON object members.
+    fn feature_table(&self, index: usize) -> String {
+        self.features
+            .iter()
+            .filter(|(package, ..)| *package == index)
+            .map(|(_, name, entries)| {
+                let entries =
+                    entries.iter().map(|entry| format!("\"{entry}\"")).collect::<Vec<_>>();
+                format!("\"{name}\":[{}]", entries.join(","))
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Every declared feature, as `resolve.nodes[].features` records them.
+    fn activated_features(&self, index: usize) -> String {
+        self.features
+            .iter()
+            .filter(|(package, ..)| *package == index)
+            .map(|(_, name, _)| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     fn id(&self, index: usize) -> String {
         let (name, version) = self.packages[index];
         if self.members.contains(&index) {
@@ -69,9 +97,10 @@ impl Spec {
                     r#""registry+https://example.invalid/index""#.to_owned()
                 };
                 format!(
-                    r#"{{"name":"{name}","version":"{version}","id":"{}","source":{source},"manifest_path":"/ws/{name}/Cargo.toml","dependencies":[{}]}}"#,
+                    r#"{{"name":"{name}","version":"{version}","id":"{}","source":{source},"manifest_path":"/ws/{name}/Cargo.toml","dependencies":[{}],"features":{{{}}}}}"#,
                     self.id(index),
-                    dependencies.join(",")
+                    dependencies.join(","),
+                    self.feature_table(index)
                 )
             })
             .collect::<Vec<_>>();
@@ -89,7 +118,12 @@ impl Spec {
                         )
                     })
                     .collect::<Vec<_>>();
-                format!(r#"{{"id":"{}","deps":[{}]}}"#, self.id(index), deps.join(","))
+                format!(
+                    r#"{{"id":"{}","deps":[{}],"features":[{}]}}"#,
+                    self.id(index),
+                    deps.join(","),
+                    self.activated_features(index)
+                )
             })
             .collect::<Vec<_>>();
         let members = self
@@ -145,7 +179,29 @@ fn fixture_spec() -> Spec {
             Decl::required(0, "dual"),
             Decl::required(1, "a"),
         ],
+        features: Vec::new(),
     }
+}
+
+/// A workspace whose optional edge exists in the resolve — the document is all-features — but
+/// which only one feature of the root turns on: the shape every feature-aware rule is about.
+///
+/// `app` declares `mid` unconditionally and `opt` optionally behind `net = ["dep:opt"]`, and
+/// `mid` reaches `leaf` whatever the selection.
+fn feature_spec() -> Spec {
+    Spec {
+        packages: vec![("app", "1.0.0"), ("opt", "1.0.0"), ("mid", "1.0.0"), ("leaf", "1.0.0")],
+        edges: vec![(0, 2, NORMAL), (0, 1, NORMAL), (2, 3, NORMAL)],
+        members: vec![0],
+        decls: vec![Decl::required(0, "mid"), Decl::optional(0, "opt"), Decl::required(2, "leaf")],
+        features: vec![(0, "net", vec!["dep:opt"])],
+    }
+}
+
+/// The same rule, evaluated on the closure `selection` activates instead of the unified one.
+fn with_features(mut rule: Rule, selection: Selection) -> Rule {
+    rule.features = Some(RuleFeatures { selection, span: meta_span() });
+    rule
 }
 
 fn meta_span() -> Span {
@@ -165,7 +221,7 @@ fn globs(values: &[&str]) -> GlobSet {
 }
 
 fn rule(id: &str, package: &str, kind: RuleKind) -> Rule {
-    Rule { id: id.to_owned(), package: package.to_owned(), kind, span: meta_span() }
+    Rule { id: id.to_owned(), package: package.to_owned(), kind, span: meta_span(), features: None }
 }
 
 fn deny(id: &str, package: &str, values: &[&str]) -> Rule {
@@ -396,4 +452,242 @@ fn matches_counter_sums_deny_extra_and_sealed_entries_and_status_order_is_stable
     assert_eq!(evaluation.statuses[1].matched, 2);
     assert_eq!(evaluation.statuses[2].matched, 0);
     assert_eq!(evaluation.statuses[3].matched, 1);
+}
+
+/// Builds a `require` rule with the same exact/glob split the configuration loader applies.
+fn require(id: &str, package: &str, values: &[&str]) -> Rule {
+    let patterns = values
+        .iter()
+        .map(|value| {
+            if value.contains(['*', '?', '[']) {
+                let glob = Glob::new(value).expect("glob compiles");
+                RequirePattern::Glob(Box::new(glob.compile_matcher()))
+            } else {
+                RequirePattern::Exact((*value).to_owned())
+            }
+        })
+        .collect();
+    rule(id, package, RuleKind::Require(patterns))
+}
+
+#[test]
+fn require_passes_when_every_exact_and_glob_pattern_matches_the_closure() {
+    let graph = fixture_spec().graph();
+    let config = config(vec![require("rules.a.require", "a", &["mid", "le*", "dual"])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(evaluation.violations.is_empty(), "every pattern matches a reached name");
+    assert!(evaluation.statuses[0].passed);
+    assert_eq!(evaluation.statuses[0].kind, "require");
+    assert_eq!(evaluation.statuses[0].matched, 0);
+    assert_eq!(evaluation.matches, 0);
+}
+
+#[test]
+fn an_empty_require_list_passes_vacuously_like_an_empty_deny_list() {
+    // Neither kind treats "no entries" as a configuration error, so both have to mean the
+    // same thing at evaluation time: nothing is asked, nothing can fail.
+    let graph = fixture_spec().graph();
+    let config =
+        config(vec![require("rules.a.require", "a", &[]), deny("rules.a.deny", "a", &[])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(evaluation.violations.is_empty(), "an empty list asks nothing of the closure");
+    assert!(evaluation.statuses.iter().all(|status| status.passed));
+    assert!(evaluation.statuses.iter().all(|status| status.matched == 0));
+    assert_eq!(evaluation.matches, 0);
+}
+
+#[test]
+fn require_reports_only_the_unmatched_patterns_in_declaration_order() {
+    let graph = fixture_spec().graph();
+    let config =
+        config(vec![require("rules.a.require", "a", &["absent", "mid", "no-such-*", "le*"])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    let violation = evaluation.violations.first().expect("require violation");
+    assert_eq!(violation.kind, "require");
+    assert_eq!(
+        violation.missing,
+        ["absent", "no-such-*"],
+        "a partial miss keeps configuration order and never lists the patterns that matched"
+    );
+    assert!(violation.matches.is_empty(), "a matched pattern carries no witness");
+    assert!(violation.extra.is_empty() && violation.sealed_by.is_empty());
+    assert_eq!(
+        evaluation.statuses[0].matched, 0,
+        "a require miss is a count of names not found, so it is not a match"
+    );
+    assert_eq!(
+        evaluation.matches, 0,
+        "the counter sums names the rules found; the miss count lives in `missing`"
+    );
+}
+
+#[test]
+fn require_is_scoped_to_the_closure_not_to_the_whole_graph() {
+    // `b` is a workspace member of the same graph, but nothing under `a` reaches it: the
+    // question `require` asks is about the rule's closure, exactly as `deny` asks it.
+    let graph = fixture_spec().graph();
+    let config = config(vec![require("rules.a.require", "a", &["b"])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert_eq!(evaluation.violations.first().expect("require violation").missing, ["b"]);
+    assert!(graph.lookup_name("b").is_some(), "the name exists, it is just not reachable");
+}
+
+#[test]
+fn require_is_never_satisfied_by_the_rules_own_package() {
+    // The dual of `deny_never_matches_the_rules_own_package`: `require` asks for a
+    // dependency, so the root's own name is not a candidate for either kind.
+    let graph = fixture_spec().graph();
+    let config = config(vec![require("rules.a.require", "a", &["a", "a*"])], &[]);
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert_eq!(evaluation.violations.first().expect("require violation").missing, ["a", "a*"]);
+}
+
+#[test]
+fn require_shares_one_forward_traversal_with_the_other_closure_rules() {
+    let graph = fixture_spec().graph();
+    let config = config(
+        vec![
+            deny("rules.a.deny", "a", &["absent"]),
+            require("rules.a.require", "a", &["mid"]),
+            rule("rules.a.leaf", "a", RuleKind::Leaf),
+        ],
+        &[],
+    );
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(evaluation.violations.is_empty());
+    assert_eq!(scratch.traversals(), 1, "require reuses the group's single forward BFS");
+}
+
+#[test]
+fn a_feature_aware_deny_reads_the_activated_closure_and_a_unified_one_reads_the_resolve() {
+    // Both rules are rooted at the same member and run in the same group, so this also pins
+    // that each gets its own closure rather than the group's first one.
+    let graph = feature_spec().graph();
+    let config = config(
+        vec![
+            deny("rules.app.deny", "app", &["opt"]),
+            with_features(deny("narrowed", "app", &["opt"]), Selection::None),
+        ],
+        &[],
+    );
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(!evaluation.statuses[0].passed, "the resolve carries the optional edge");
+    assert_eq!(evaluation.statuses[0].features, None);
+    assert!(
+        evaluation.statuses[0].activation_pruned.is_empty(),
+        "a rule that narrows nothing prunes nothing"
+    );
+
+    assert!(
+        evaluation.statuses[1].passed,
+        "--no-default-features never turns `net` on, so the `opt` edge is not compiled"
+    );
+    assert_eq!(evaluation.statuses[1].features, Some(Selection::None));
+    assert_eq!(
+        evaluation.statuses[1].activation_pruned,
+        ["opt"],
+        "`opt` is the one name the activation removed; `mid` and `leaf` are unconditional"
+    );
+    assert_eq!(evaluation.violations.len(), 1, "only the unified rule fires");
+    assert_eq!(evaluation.violations[0].rule_id, "rules.app.deny");
+}
+
+#[test]
+fn a_feature_aware_deny_still_fires_when_the_selection_activates_the_edge() {
+    let graph = feature_spec().graph();
+    let selection = Selection::List(vec!["net".to_owned()]);
+    let config = config(
+        vec![with_features(deny("rules.app.deny", "app", &["opt"]), selection.clone())],
+        &[],
+    );
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(!evaluation.statuses[0].passed, "`net` is `dep:opt`, so the edge is compiled");
+    assert_eq!(evaluation.violations.len(), 1);
+    let violation = &evaluation.violations[0];
+    assert_eq!(violation.matches.len(), 1);
+    assert_eq!(violation.matches[0].name, "opt");
+    assert_eq!(violation.features, Some(selection), "the record names the closure that answered");
+    assert!(
+        violation.activation_pruned.is_empty(),
+        "this selection removes nothing from the unified closure"
+    );
+}
+
+#[test]
+fn a_feature_aware_require_fails_when_its_selection_prunes_the_required_name() {
+    // The direction that matters for `require`: narrowing can only make it fail, never pass.
+    let graph = feature_spec().graph();
+    let config = config(
+        vec![with_features(
+            rule(
+                "rules.app.require",
+                "app",
+                RuleKind::Require(vec![RequirePattern::Exact("opt".to_owned())]),
+            ),
+            Selection::None,
+        )],
+        &[],
+    );
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(!evaluation.statuses[0].passed);
+    assert_eq!(evaluation.violations[0].missing, ["opt"]);
+    assert_eq!(evaluation.violations[0].activation_pruned, ["opt"]);
+}
+
+#[test]
+fn a_features_key_leaves_direct_and_sealed_rules_alone() {
+    // Neither kind reads a closure, so neither is narrowed and neither record claims to be.
+    let graph = feature_spec().graph();
+    let config = config(
+        vec![
+            with_features(
+                rule("rules.app.direct", "app", RuleKind::Direct(names(&["mid"]))),
+                Selection::None,
+            ),
+            with_features(rule("rules.app.sealed", "app", RuleKind::Sealed), Selection::None),
+        ],
+        &[],
+    );
+    let mut scratch = Scratch::new(&graph);
+
+    let evaluation = evaluate(&graph, &config, &mut scratch);
+
+    assert!(
+        !evaluation.statuses[0].passed,
+        "`direct` still sees the resolved depth-one edges, `opt` among them"
+    );
+    assert_eq!(evaluation.violations[0].extra.len(), 1);
+    assert_eq!(evaluation.violations[0].extra[0].name, "opt");
+    assert!(evaluation.statuses[1].passed, "no other member reaches `app`");
+    for status in &evaluation.statuses {
+        assert_eq!(status.features, None, "a record must not claim a narrowing that did not apply");
+        assert!(status.activation_pruned.is_empty());
+    }
 }
