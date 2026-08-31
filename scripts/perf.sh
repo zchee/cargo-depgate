@@ -12,6 +12,9 @@ set -euo pipefail
 #
 # The hermetic fixture is lemmy, the largest of the three committed examples
 # (3,526,964 decompressed bytes), so the gates describe the worst case that ships.
+#
+# On --profile ci, and only there, a measurement that reports a FAIL is re-run once
+# at the same bounds and the second result stands; see run_measurement below.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly repo_root
@@ -111,9 +114,46 @@ readonly metadata_path="$work_root/metadata.json"
 readonly build_log="$work_root/build.log"
 readonly measure_log="$work_root/measure.log"
 readonly bench_log="$work_root/bench.log"
+readonly synthetic_log="$work_root/synthetic.log"
 readonly p1_log="$work_root/p1.log"
 readonly p1_json="$work_root/p1.json"
 gunzip -c "$fixture_root/metadata.json.gz" >"$metadata_path"
+
+# Retry policy, --profile ci only. The ci bounds are met on shared GitHub runners
+# with the thinnest margins in the suite (own-work 5.94 of 9 ms, AC-P6b 33.7 of
+# 60 ms), where a neighbouring workload on the same host can push an unchanged
+# build past a bound. Re-running the failing measurement once, against the same
+# bounds, separates that from a regression: a regression fails twice. No bound is
+# widened here -- moving one requires a recorded re-derivation in plan §13 -- and
+# the dev profile stays single-shot, where a FAIL is worth looking at directly.
+#
+# $1 names the measurement, $2 is its log, $3 is the function that performs it and
+# writes its report to standard output. Only the surviving attempt reaches standard
+# output, so the one-line-per-gate contract holds; a discarded first attempt is
+# echoed to standard error with every line marked, so both attempts are in the log
+# and a flake cannot be mistaken for a clean run. The measurement functions are
+# called with errexit disabled: inside them a failing step is a result to report,
+# not a reason to abort.
+run_measurement() {
+    local name="$1"
+    local log="$2"
+    local measurement="$3"
+    local status
+    "$measurement" >"$log" 2>&1
+    status=$?
+    if [[ "$profile" == "ci" ]] && { (( status != 0 )) || grep -q $'\tFAIL$' "$log"; }; then
+        {
+            printf 'retry: %s attempt 1 reported a FAIL; re-running it once at the same bounds\n' \
+                "$name"
+            sed 's/^/retry attempt 1: /' "$log"
+        } >&2
+        "$measurement" >"$log" 2>&1
+        status=$?
+        printf 'retry: %s attempt 2 follows on stdout and is the result that stands\n' "$name" >&2
+    fi
+    cat "$log"
+    return "$status"
+}
 
 if ! RUSTFLAGS='' cargo build --release --locked >"$build_log" 2>&1; then
     cat "$build_log" >&2
@@ -146,15 +186,20 @@ p1_argv=(
 p1_command="$(printf '%q ' "${p1_argv[@]}")"
 p1_command="${p1_command% }"
 readonly p1_command
-if ! hyperfine -N --warmup 3 --runs "$runs" --export-json "$p1_json" "$p1_command" >"$p1_log" 2>&1; then
-    cat "$p1_log" >&2
-    printf 'AC-P1-%s\t0.000\t%s\tFAIL\n' "$profile" "$p1_bound"
-    printf 'AC-P2-own-work\t0.000\t%s\tFAIL\n' "$own_work_bound"
-    printf 'AC-P6a-parse-gbps\t0.000\t%s\tFAIL\n' "$parse_rate_bound"
-    printf 'AC-P6b-own-work\t0.000\t%s\tFAIL\n' "$synthetic_own_work_bound"
-    exit 1
-fi
-if ! p1_mean="$(python3 - "$p1_json" <<'PY'
+# One attempt at the AC-P1 wall-clock gate and the AC-P2 own-work gate: hyperfine
+# first, then the medians of the tool's own --timings lines. Both gate lines and the
+# per-phase diagnostics go to standard output, so run_measurement can hold on to the
+# attempt. The AC-P6 lines are the caller's to print: they belong to a measurement
+# this one may never reach.
+measure_wall_and_own_work() {
+    local p1_mean
+    if ! hyperfine -N --warmup 3 --runs "$runs" --export-json "$p1_json" "$p1_command" >"$p1_log" 2>&1; then
+        cat "$p1_log" >&2
+        printf 'AC-P1-%s\t0.000\t%s\tFAIL\n' "$profile" "$p1_bound"
+        printf 'AC-P2-own-work\t0.000\t%s\tFAIL\n' "$own_work_bound"
+        return 1
+    fi
+    if ! p1_mean="$(python3 - "$p1_json" <<'PY'
 import json
 import sys
 
@@ -165,18 +210,15 @@ if len(results) != 1 or not isinstance(results[0].get("mean"), (int, float)):
 print(float(results[0]["mean"]) * 1_000.0)
 PY
 )"; then
-    cat "$p1_log" >&2
-    printf 'error: unable to parse hyperfine AC-P1 output\n' >&2
-    printf 'AC-P1-%s\t0.000\t%s\tFAIL\n' "$profile" "$p1_bound"
-    printf 'AC-P2-own-work\t0.000\t%s\tFAIL\n' "$own_work_bound"
-    printf 'AC-P6a-parse-gbps\t0.000\t%s\tFAIL\n' "$parse_rate_bound"
-    printf 'AC-P6b-own-work\t0.000\t%s\tFAIL\n' "$synthetic_own_work_bound"
-    exit 1
-fi
+        cat "$p1_log" >&2
+        printf 'error: unable to parse hyperfine AC-P1 output\n' >&2
+        printf 'AC-P1-%s\t0.000\t%s\tFAIL\n' "$profile" "$p1_bound"
+        printf 'AC-P2-own-work\t0.000\t%s\tFAIL\n' "$own_work_bound"
+        return 1
+    fi
 
-set +e
-python3 - "$binary" "$metadata_path" "$fixture_root" "$config_path" "$runs" \
-    "$profile" "$p1_mean" "$p1_bound" "$own_work_bound" >"$measure_log" 2>&1 <<'PY'
+    python3 - "$binary" "$metadata_path" "$fixture_root" "$config_path" "$runs" \
+        "$profile" "$p1_mean" "$p1_bound" "$own_work_bound" 2>&1 <<'PY'
 import os
 import subprocess
 import sys
@@ -279,46 +321,62 @@ except Exception as error:
     print(f"measurement-error\t{error}", file=sys.stderr)
     sys.exit(1)
 PY
+}
+
+set +e
+run_measurement "AC-P1/AC-P2" "$measure_log" measure_wall_and_own_work
 measure_status=$?
 set -e
-cat "$measure_log"
 if (( measure_status != 0 )); then
     printf 'AC-P6a-parse-gbps\t0.000\t%s\tFAIL\n' "$parse_rate_bound"
     printf 'AC-P6b-own-work\t0.000\t%s\tFAIL\n' "$synthetic_own_work_bound"
     exit 1
 fi
 
+# One attempt at the two synthetic gates, AC-P6a (parse throughput) and AC-P6b
+# (non-parse own work). The bench log is part of the attempt, so it is printed from
+# here. Called with errexit disabled by run_measurement.
+measure_synthetic() {
+    local bench_status parse_rate own_work parse_pass own_pass parse_result own_result
+    DEPGATE_BENCH_PROFILE="$profile" RUSTFLAGS='' cargo \
+        bench --locked --bench pipeline >"$bench_log" 2>&1
+    bench_status=$?
+    cat "$bench_log"
+
+    parse_rate="$(sed -nE 's/.*achieved parse GB\/s at 1k, 5k, 20k: [^,]+, [^,]+, ([0-9.]+).*/\1/p' "$bench_log" | tail -n 1)"
+    own_work="$(sed -nE 's/.*synthetic non-parse own-work at 20k: ([0-9.]+) ms.*/\1/p' "$bench_log" | tail -n 1)"
+    if [[ -z "$parse_rate" ]]; then
+        parse_rate="0.000"
+    fi
+    if [[ -z "$own_work" ]]; then
+        own_work="0.000"
+    fi
+
+    parse_pass=0
+    own_pass=0
+    if [[ "$bench_status" -eq 0 ]] && awk -v value="$parse_rate" -v bound="$parse_rate_bound" 'BEGIN { exit !(value >= bound) }'; then
+        parse_pass=1
+    fi
+    if [[ "$bench_status" -eq 0 ]] && awk -v value="$own_work" -v bound="$synthetic_own_work_bound" 'BEGIN { exit !(value <= bound) }'; then
+        own_pass=1
+    fi
+    if (( parse_pass )); then parse_result=PASS; else parse_result=FAIL; fi
+    if (( own_pass )); then own_result=PASS; else own_result=FAIL; fi
+    printf 'AC-P6a-parse-gbps\t%s\t%s\t%s\n' "$parse_rate" "$parse_rate_bound" "$parse_result"
+    printf 'AC-P6b-own-work\t%s\t%s\t%s\n' "$own_work" "$synthetic_own_work_bound" "$own_result"
+    if (( parse_pass && own_pass )); then
+        return 0
+    fi
+    return 1
+}
+
 set +e
-DEPGATE_BENCH_PROFILE="$profile" RUSTFLAGS='' cargo \
-    bench --locked --bench pipeline >"$bench_log" 2>&1
-bench_status=$?
+run_measurement AC-P6 "$synthetic_log" measure_synthetic
+synthetic_status=$?
 set -e
-cat "$bench_log"
-
-parse_rate="$(sed -nE 's/.*achieved parse GB\/s at 1k, 5k, 20k: [^,]+, [^,]+, ([0-9.]+).*/\1/p' "$bench_log" | tail -n 1)"
-own_work="$(sed -nE 's/.*synthetic non-parse own-work at 20k: ([0-9.]+) ms.*/\1/p' "$bench_log" | tail -n 1)"
-if [[ -z "$parse_rate" ]]; then
-    parse_rate="0.000"
-fi
-if [[ -z "$own_work" ]]; then
-    own_work="0.000"
-fi
-
-parse_pass=0
-own_pass=0
-if [[ "$bench_status" -eq 0 ]] && awk -v value="$parse_rate" -v bound="$parse_rate_bound" 'BEGIN { exit !(value >= bound) }'; then
-    parse_pass=1
-fi
-if [[ "$bench_status" -eq 0 ]] && awk -v value="$own_work" -v bound="$synthetic_own_work_bound" 'BEGIN { exit !(value <= bound) }'; then
-    own_pass=1
-fi
-if (( parse_pass )); then parse_result=PASS; else parse_result=FAIL; fi
-if (( own_pass )); then own_result=PASS; else own_result=FAIL; fi
-printf 'AC-P6a-parse-gbps\t%s\t%s\t%s\n' "$parse_rate" "$parse_rate_bound" "$parse_result"
-printf 'AC-P6b-own-work\t%s\t%s\t%s\n' "$own_work" "$synthetic_own_work_bound" "$own_result"
 
 gate_failed=0
-if grep -q $'\tFAIL$' "$measure_log" || (( !parse_pass || !own_pass )); then
+if grep -q $'\tFAIL$' "$measure_log" || (( synthetic_status != 0 )); then
     gate_failed=1
 fi
 
@@ -327,8 +385,9 @@ fi
 # measurement requires /usr/bin/time (the `time` package on Debian/Ubuntu, not
 # the shell builtin) and fails closed when it is absent.
 readonly rss_log="$work_root/rss.log"
-set +e
-python3 - "$binary" "$metadata_path" "$fixture_root" "$config_path" >"$rss_log" 2>&1 <<'PY'
+# One attempt at AC-P5. Called with errexit disabled by run_measurement.
+measure_rss() {
+    python3 - "$binary" "$metadata_path" "$fixture_root" "$config_path" 2>&1 <<'PY'
 import os
 import re
 import subprocess
@@ -433,58 +492,21 @@ except Exception as error:
     print(f"P5 measurement error: {error}", file=sys.stderr)
     sys.exit(1)
 PY
+}
+
+set +e
+run_measurement AC-P5 "$rss_log" measure_rss
 rss_status=$?
 set -e
-cat "$rss_log"
 if (( rss_status != 0 )); then
     gate_failed=1
 fi
 
-if [[ "$live" == "1" ]]; then
-    # AC-P3 and AC-P4 must run against the *pinned* commit, otherwise they compare
-    # today's upstream tree against a document frozen months earlier. An explicit
-    # DEPGATE_PERF_WORKSPACE is taken as-is (the caller vouches for it); otherwise the
-    # tree is materialised with `git archive` out of the same clone directory
-    # scripts/fixture.sh uses, which is the only place the commit is ever checked out.
-    if [[ -n "${DEPGATE_PERF_WORKSPACE:-}" ]]; then
-        live_workspace="$DEPGATE_PERF_WORKSPACE"
-    else
-        clone_root="${DEPGATE_FIXTURE_CLONES:-${TMPDIR:-/tmp}/cargo-depgate-fixture-clones}"
-        readonly clone_root
-        readonly clone="$clone_root/lemmy"
-        if [[ ! -d "$clone/.git" ]]; then
-            printf 'error: no lemmy clone at %s; run scripts/fixture.sh lemmy --check first, or set DEPGATE_PERF_WORKSPACE\n' \
-                "$clone" >&2
-            exit 1
-        fi
-        if ! git -C "$clone" cat-file -e "$live_commit^{commit}" 2>/dev/null; then
-            printf 'error: commit %s is not present in %s\n' "$live_commit" "$clone" >&2
-            exit 1
-        fi
-        live_workspace="$work_root/live-workspace"
-        mkdir -p "$live_workspace"
-        git -C "$clone" archive "$live_commit" | tar -x -C "$live_workspace"
-        # `cargo tree --all-features` (the upstream L204 assertion the AC-P4 replica
-        # reproduces) resolves optional crates the default feature set never names, so
-        # warm the registry cache once before anything is timed. It downloads; it never
-        # compiles, and it is outside every measured command.
-        (cd "$live_workspace" && RUSTFLAGS='' RUSTUP_TOOLCHAIN="$live_toolchain" \
-            cargo fetch --locked >/dev/null 2>&1) || {
-            printf 'error: cargo fetch failed for the pinned lemmy tree\n' >&2
-            exit 1
-        }
-    fi
-    readonly live_workspace
-    # Hand the resolved workspace to benches/baseline/ci-lint-baseline.sh, which reads
-    # the same variable: without this the AC-P4 speedup could divide one workspace's
-    # shell replica by another workspace's tool run and still PASS.
-    export DEPGATE_PERF_WORKSPACE="$live_workspace"
-    export DEPGATE_PERF_TOOLCHAIN="$live_toolchain"
-    printf 'live workspace: %s\n' "$live_workspace" >&2
-    readonly live_log="$work_root/live.log"
-    set +e
+# One attempt at the live AC-P3 and AC-P4 gates, over the workspace materialised
+# below. Called with errexit disabled by run_measurement.
+measure_live() {
     python3 - "$binary" "$live_workspace" "$config_path" \
-        "$repo_root/benches/baseline/ci-lint-baseline.sh" "$runs" >"$live_log" 2>&1 <<'PY'
+        "$repo_root/benches/baseline/ci-lint-baseline.sh" "$runs" 2>&1 <<'PY'
 import json
 import os
 import shlex
@@ -623,9 +645,54 @@ except Exception as error:
 
 sys.exit(1 if failed else 0)
 PY
+}
+
+if [[ "$live" == "1" ]]; then
+    # AC-P3 and AC-P4 must run against the *pinned* commit, otherwise they compare
+    # today's upstream tree against a document frozen months earlier. An explicit
+    # DEPGATE_PERF_WORKSPACE is taken as-is (the caller vouches for it); otherwise the
+    # tree is materialised with `git archive` out of the same clone directory
+    # scripts/fixture.sh uses, which is the only place the commit is ever checked out.
+    if [[ -n "${DEPGATE_PERF_WORKSPACE:-}" ]]; then
+        live_workspace="$DEPGATE_PERF_WORKSPACE"
+    else
+        clone_root="${DEPGATE_FIXTURE_CLONES:-${TMPDIR:-/tmp}/cargo-depgate-fixture-clones}"
+        readonly clone_root
+        readonly clone="$clone_root/lemmy"
+        if [[ ! -d "$clone/.git" ]]; then
+            printf 'error: no lemmy clone at %s; run scripts/fixture.sh lemmy --check first, or set DEPGATE_PERF_WORKSPACE\n' \
+                "$clone" >&2
+            exit 1
+        fi
+        if ! git -C "$clone" cat-file -e "$live_commit^{commit}" 2>/dev/null; then
+            printf 'error: commit %s is not present in %s\n' "$live_commit" "$clone" >&2
+            exit 1
+        fi
+        live_workspace="$work_root/live-workspace"
+        mkdir -p "$live_workspace"
+        git -C "$clone" archive "$live_commit" | tar -x -C "$live_workspace"
+        # `cargo tree --all-features` (the upstream L204 assertion the AC-P4 replica
+        # reproduces) resolves optional crates the default feature set never names, so
+        # warm the registry cache once before anything is timed. It downloads; it never
+        # compiles, and it is outside every measured command.
+        (cd "$live_workspace" && RUSTFLAGS='' RUSTUP_TOOLCHAIN="$live_toolchain" \
+            cargo fetch --locked >/dev/null 2>&1) || {
+            printf 'error: cargo fetch failed for the pinned lemmy tree\n' >&2
+            exit 1
+        }
+    fi
+    readonly live_workspace
+    # Hand the resolved workspace to benches/baseline/ci-lint-baseline.sh, which reads
+    # the same variable: without this the AC-P4 speedup could divide one workspace's
+    # shell replica by another workspace's tool run and still PASS.
+    export DEPGATE_PERF_WORKSPACE="$live_workspace"
+    export DEPGATE_PERF_TOOLCHAIN="$live_toolchain"
+    printf 'live workspace: %s\n' "$live_workspace" >&2
+    readonly live_log="$work_root/live.log"
+    set +e
+    run_measurement "AC-P3/AC-P4" "$live_log" measure_live
     live_status=$?
     set -e
-    cat "$live_log"
     if (( live_status != 0 )); then
         gate_failed=1
     fi
