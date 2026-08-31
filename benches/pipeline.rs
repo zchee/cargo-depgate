@@ -104,9 +104,17 @@ impl BenchProfile {
         }
     }
 
+    /// The AC-P6b ceiling on the synthetic 20k graph's non-parse own work.
+    ///
+    /// The dev bound is 30.0, re-derived on 2026-08-31 (plan §6) from the 20.0 it
+    /// shipped at: the measurement reads 19.221 ms with a spread of 18.81-19.59, which
+    /// leaves 2-4% and would flake rather than catch anything. Against v0.1.0's
+    /// 15.270/17.521 ms and the wave-A tip's 17.607 ms the drift sits at or under this
+    /// measurement's ~2 ms noise floor, so no single change accounts for it. 30.0 is
+    /// 1.56x the measurement; the ci bound already carried that much headroom and stays.
     const fn own_work_ms(self) -> f64 {
         match self {
-            Self::Dev => 20.0,
+            Self::Dev => 30.0,
             Self::Ci => 60.0,
         }
     }
@@ -140,6 +148,36 @@ static REAL_CONFIG: LazyLock<Config> = LazyLock::new(|| {
     config::validate(&raw, Some(&REAL_GRAPH))
         .expect("validate hermetic depgate config against graph")
         .config
+});
+
+/// The whole-graph feature-aware policy: one `deny` rule rooted at `lemmy_server`, the
+/// member that closes over every other, under `features = "all"` so the rule is answered by
+/// an activation walk rather than the unified closure, and naming a package the graph does
+/// not carry so no match cuts the walk short.
+///
+/// It is written here rather than read from `tests/fixtures/lemmy.depgate.toml` for the
+/// reason `scripts/perf.sh` writes its own: the committed policy is free to change shape,
+/// and this case has to keep timing one fixed workload. It is the same rule the
+/// `AC-P2-feature-own-work` gate measures, so the two numbers stay comparable.
+const REAL_FEATURE_CONFIG_TEXT: &str = concat!(
+    "schema = 1\n\n",
+    "[manifest]\nversions-in-root = false\n\n",
+    "[rules.lemmy_server]\n",
+    "features = \"all\"\n",
+    "deny = [\"depgate-perf-absent-package\"]\n",
+);
+
+static REAL_FEATURE_CONFIG: LazyLock<Config> = LazyLock::new(|| {
+    let raw: config::RawConfig =
+        toml::from_str(REAL_FEATURE_CONFIG_TEXT).expect("parse whole-graph feature policy");
+    let config = config::validate(&raw, Some(&REAL_GRAPH))
+        .expect("validate whole-graph feature policy against graph")
+        .config;
+    assert!(
+        config.rules.iter().all(|rule| rule.features.is_some()),
+        "the whole-graph benchmark must keep measuring the feature-aware path"
+    );
+    config
 });
 
 static REAL_METADATA_TEMP: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
@@ -246,6 +284,24 @@ fn real_graph(bencher: Bencher) {
 fn real_rules(bencher: Bencher) {
     let graph = &*REAL_GRAPH;
     let config = &*REAL_CONFIG;
+    let mut scratch = Scratch::new(graph);
+    bencher.bench_local(|| {
+        black_box(rules::evaluate(graph, config, &mut scratch));
+    });
+}
+
+/// Rule evaluation under a single rule whose activation reaches the whole graph (AC 14):
+/// the worst case the feature-aware path has on this fixture, since one root that closes
+/// over every member leaves the walk nothing to prune.
+///
+/// It is not comparable to [`real_rules`] as a before/after pair — that one measures the
+/// committed policy, which is three rules and already feature-aware. The unified/narrowed
+/// comparison is `scripts/perf.sh`'s, between its two script-owned policies, which differ
+/// only in the `features` key.
+#[divan::bench(sample_count = 5, sample_size = 1)]
+fn real_rules_feature_all(bencher: Bencher) {
+    let graph = &*REAL_GRAPH;
+    let config = &*REAL_FEATURE_CONFIG;
     let mut scratch = Scratch::new(graph);
     bencher.bench_local(|| {
         black_box(rules::evaluate(graph, config, &mut scratch));

@@ -11,12 +11,13 @@ A high-performance dependency policy enforcer and CI gatekeeper for Cargo worksp
 * **Deterministic Fail-Fast CI**: Emits structured diagnostics with precise exit codes tailored for GitHub Actions and automated workflows.
 * **Zero Compilation Overhead**: Evaluates the resolved `cargo metadata` graph directly without compiling source code.
 
-Concretely: the gate's own work after `cargo metadata` returns is ~4 ms on a 700-package workspace,
-so its cost is dominated by the single resolve it already needs. Replacing the four `cargo tree`
-invocations of lemmy's dependency-policy step — all four of which the gate expresses — with one
-gate run measures 3.1x end to end (298.7 ms against 931.2 ms on `aarch64-apple-darwin`; the absolute
-numbers move with the host, the ratio holds), and the ceiling scales with how many invocations a
-policy replaces.
+Concretely: on lemmy's 833-package workspace the gate's own work after `cargo metadata` returns is
+5 ms for plain reachability rules, or 14 ms for the feature-aware policy this repository ships for
+that example, against the ~265 ms the resolve itself costs — so the gate's cost is dominated by the
+single resolve it already needs. Replacing the four `cargo tree` invocations of lemmy's
+dependency-policy step — all four of which the gate expresses — with one gate run measures 3.3x end
+to end (271.8 ms against 906.2 ms on `aarch64-apple-darwin`; the absolute numbers move with the
+host, the ratio holds), and the ceiling scales with how many invocations a policy replaces.
 
 ## Install and run
 
